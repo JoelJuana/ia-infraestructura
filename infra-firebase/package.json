@@ -1,0 +1,30 @@
+{
+  "name": "infra-firebase",
+  "version": "1.0.0",
+  "description": "API local y servicio de automatización de Firebase para la suite de agentes autónomos",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "lint": "eslint .",
+    "format": "prettier --write ."
+  },
+  "keywords": [
+    "firebase",
+    "api",
+    "automation",
+    "agents"
+  ],
+  "author": "JoelJuana",
+  "license": "MIT",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "firebase-admin": "^12.1.0"
+  },
+  "devDependencies": {
+    "eslint": "^8.57.0",
+    "eslint-config-prettier": "^9.1.0",
+    "prettier": "^3.2.5"
+  }
+}

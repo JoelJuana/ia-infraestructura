@@ -1,0 +1,23 @@
+# Dependencias y compilación
+node_modules/
+dist/
+build/
+*.log
+
+# Entornos locales (contienen tokens y credenciales)
+.env
+.env.local
+.env.*.local
+
+# Logs de infraestructura
+.infra-logs/
+
+# Backups de Git antiguos
+.git_backup/
+
+# Archivos del sistema
+.DS_Store
+Thumbs.db
+
+# Lock files (cada servicio tiene el suyo, pero no es necesario versionarlos)
+package-lock.json

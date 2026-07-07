@@ -1,0 +1,32 @@
+name: Validar Estilo y Estructura de Publicaciones
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: 'npm'
+
+      - name: Instalar dependencias
+        run: npm install
+
+      - name: Validar Posts (Frontmatter y Markdown)
+        run: node scripts/validate-posts.js
+
+      - name: Ejecutar Linter de Código del CMS
+        run: npm run lint
