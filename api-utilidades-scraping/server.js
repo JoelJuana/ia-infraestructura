@@ -138,6 +138,20 @@ app.post('/extract', async (req, res) => {
   }
 });
 
+// 3. GET: Ping healthcheck
+app.get('/ping', (req, res) => {
+  res.json({ status: 'ok' });
+});
+
+// 4. POST: Shutdown
+app.post('/api/shutdown', (req, res) => {
+  res.json({ success: true, message: 'Servidor apagándose...' });
+  console.log('Recibida petición de apagado. Cerrando servidor de Scraping...');
+  setTimeout(() => {
+    process.exit(0);
+  }, 1000);
+});
+
 app.listen(PORT, () => {
   console.log(`⚡ API de Web Scraping & Extraccion activa en http://localhost:${PORT}`);
 });

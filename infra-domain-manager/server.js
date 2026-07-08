@@ -7,7 +7,7 @@ const crypto = require("crypto");
 
 // Intentar cargar variables de entorno locales, y si no, del proyecto github
 const localEnvPath = path.join(__dirname, ".env");
-const cmsEnvPath = path.join(__dirname, "..", "github", ".env");
+const cmsEnvPath = path.join(__dirname, "..", "infra-github", ".env");
 
 if (fs.existsSync(localEnvPath)) {
   dotenv.config({ path: localEnvPath });
@@ -16,9 +16,9 @@ if (fs.existsSync(localEnvPath)) {
   // Copiar del CMS al local por comodidad inicial
   try {
     fs.copyFileSync(cmsEnvPath, localEnvPath);
-    console.log("✓ Copiado archivo .env desde github");
+    console.log("✓ Copiado archivo .env desde infra-github");
   } catch (e) {
-    console.warn("⚠️ No se pudo copiar el .env de github:", e.message);
+    console.warn("⚠️ No se pudo copiar el .env de infra-github:", e.message);
   }
 } else {
   dotenv.config();

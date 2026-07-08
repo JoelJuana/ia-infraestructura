@@ -1,8 +1,15 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const STORE_PATH = path.resolve(__dirname, 'data', 'store.json');
 
 const app = express();
 const PORT = process.env.PORT || 4400;
@@ -18,6 +25,35 @@ app.use((req, res, next) => {
 
 // Almacenamiento en memoria de fragmentos (chunks) indexados
 let documentStore = [];
+
+// Intentar cargar la base de datos de conocimiento persistente
+try {
+  if (fs.existsSync(STORE_PATH)) {
+    const rawData = fs.readFileSync(STORE_PATH, 'utf-8');
+    documentStore = JSON.parse(rawData);
+    console.log(`✓ Base de conocimiento RAG cargada desde disco: ${documentStore.length} chunks.`);
+  } else {
+    console.log('ℹ No se detecto base de conocimiento persistente en disco. Iniciando vacia.');
+  }
+} catch (err) {
+  console.error('⚠️ Error al cargar la base de conocimiento desde disco:', err.message);
+}
+
+// Helper para persistir el store en disco
+function saveStore() {
+  try {
+    const dir = path.dirname(STORE_PATH);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(STORE_PATH, JSON.stringify(documentStore, null, 2), 'utf-8');
+    console.log(`✓ Base de conocimiento RAG guardada en disco: ${documentStore.length} chunks.`);
+    return true;
+  } catch (err) {
+    console.error('⚠️ Error al guardar la base de conocimiento en disco:', err.message);
+    return false;
+  }
+}
 
 // Helper para limpiar y tokenizar texto
 function tokenize(text) {
@@ -101,6 +137,7 @@ app.post('/index', (req, res) => {
     });
 
     documentStore.push(...newChunks);
+    saveStore();
 
     res.json({
       ok: true,
@@ -179,10 +216,26 @@ app.post('/search', (req, res) => {
 // 4. DELETE: Limpiar el store en memoria (para pruebas)
 app.delete('/store', (req, res) => {
   documentStore = [];
+  saveStore();
   res.json({
     ok: true,
     message: "Base de conocimientos RAG restablecida correctamente."
   });
+});
+
+// 5. GET: Ping healthcheck
+app.get('/ping', (req, res) => {
+  res.json({ status: 'ok' });
+});
+
+// 6. POST: Shutdown
+app.post('/api/shutdown', (req, res) => {
+  saveStore();
+  res.json({ success: true, message: 'Servidor apagándose...' });
+  console.log('Recibida petición de apagado. Cerrando servidor de RAG...');
+  setTimeout(() => {
+    process.exit(0);
+  }, 1000);
 });
 
 app.listen(PORT, () => {

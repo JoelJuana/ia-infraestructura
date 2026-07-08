@@ -267,6 +267,20 @@ app.post('/mockup', (req, res) => {
   });
 });
 
+// 5. GET: Ping healthcheck
+app.get('/ping', (req, res) => {
+  res.json({ status: 'ok' });
+});
+
+// 6. POST: Shutdown
+app.post('/api/shutdown', (req, res) => {
+  res.json({ success: true, message: 'Servidor apagándose...' });
+  console.log('Recibida petición de apagado. Cerrando servidor de Design Assets...');
+  setTimeout(() => {
+    process.exit(0);
+  }, 1000);
+});
+
 app.listen(PORT, () => {
   console.log(`⚡ API de Diseno & Assets activa en http://localhost:${PORT}`);
 });

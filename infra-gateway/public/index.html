@@ -1,0 +1,871 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Proyectos IA — Dashboard de Infraestructura</title>
+  <!-- Google Fonts: Inter -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+  
+  <style>
+    /* ─── Variables de Diseño ──────────────────────────────────────────────── */
+    :root {
+      --bg-gradient: radial-gradient(circle at 50% 0%, #151a30 0%, #0a0d1a 100%);
+      --card-bg: rgba(255, 255, 255, 0.02);
+      --card-border: rgba(255, 255, 255, 0.07);
+      --card-border-hover: rgba(99, 102, 241, 0.4);
+      --text-main: #f3f4f6;
+      --text-muted: #9ca3af;
+      --primary: #6366f1;
+      --primary-hover: #4f46e5;
+      
+      --color-online: #10b981;
+      --color-offline: #ef4444;
+      --color-degraded: #f59e0b;
+      
+      --shadow-premium: 0 10px 30px -10px rgba(0, 0, 0, 0.5);
+      --transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    /* ─── Estilos Globales ──────────────────────────────────────────────────── */
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--bg-gradient);
+      color: var(--text-main);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow-x: hidden;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    /* ─── Layout y Contenedores ────────────────────────────────────────────── */
+    .container {
+      max-width: 1200px;
+      width: 100%;
+      margin: 0 auto;
+      padding: 2.5rem 1.5rem;
+      flex-grow: 1;
+    }
+
+    /* Header */
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 3.5rem;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      padding-bottom: 2rem;
+    }
+
+    .brand {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+
+    .brand h1 {
+      font-size: 1.85rem;
+      font-weight: 800;
+      background: linear-gradient(135deg, #ffffff 30%, #a5b4fc 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      letter-spacing: -0.025em;
+    }
+
+    .brand p {
+      font-size: 0.9rem;
+      color: var(--text-muted);
+    }
+
+    /* Badge del Estado Global */
+    .global-status {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.6rem 1.2rem;
+      border-radius: 50px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      font-size: 0.85rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      transition: var(--transition);
+      box-shadow: var(--shadow-premium);
+    }
+
+    .orchestrator-badge {
+      font-size: 0.7rem;
+      font-weight: 700;
+      padding: 0.2rem 0.5rem;
+      border-radius: 6px;
+      margin-right: 0.25rem;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+    
+    .badge-pm2 {
+      background: rgba(168, 85, 247, 0.08);
+      border: 1px solid rgba(168, 85, 247, 0.25);
+      color: #c084fc;
+    }
+
+    .badge-standalone {
+      background: rgba(59, 130, 246, 0.08);
+      border: 1px solid rgba(59, 130, 246, 0.25);
+      color: #60a5fa;
+    }
+
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      position: relative;
+    }
+
+    .status-dot.pulse::after {
+      content: '';
+      position: absolute;
+      width: 100%;
+      height: 100%;
+      border-radius: 50%;
+      background: inherit;
+      opacity: 0.6;
+      animation: status-pulse 2s infinite ease-out;
+    }
+
+    @keyframes status-pulse {
+      0% { transform: scale(1); opacity: 0.6; }
+      100% { transform: scale(2.8); opacity: 0; }
+    }
+
+    /* Estados dinámicos */
+    .status-online { color: var(--color-online); background-color: var(--color-online); }
+    .status-offline { color: var(--color-offline); background-color: var(--color-offline); }
+    .status-degraded { color: var(--color-degraded); background-color: var(--color-degraded); }
+
+    /* ─── Grid de Servicios ────────────────────────────────────────────────── */
+    .services-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 1.5rem;
+      margin-bottom: 4rem;
+    }
+
+    .service-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      padding: 1.5rem;
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      transition: var(--transition);
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      min-height: 200px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .service-card::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: linear-gradient(180deg, rgba(99, 102, 241, 0.05) 0%, transparent 100%);
+      opacity: 0;
+      transition: var(--transition);
+      pointer-events: none;
+    }
+
+    .service-card:hover {
+      transform: translateY(-5px);
+      border-color: var(--card-border-hover);
+      box-shadow: 0 15px 30px -10px rgba(99, 102, 241, 0.15);
+    }
+
+    .service-card:hover::before {
+      opacity: 1;
+    }
+
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 1.25rem;
+    }
+
+    .service-info {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+
+    .service-name {
+      font-size: 1.1rem;
+      font-weight: 700;
+      color: #ffffff;
+      letter-spacing: -0.01em;
+    }
+
+    .service-port {
+      font-size: 0.8rem;
+      font-weight: 500;
+      color: var(--text-muted);
+      background: rgba(255, 255, 255, 0.04);
+      padding: 0.15rem 0.5rem;
+      border-radius: 4px;
+      width: fit-content;
+    }
+
+    .card-status {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .env-alert {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      font-size: 0.7rem;
+      font-weight: 700;
+      color: #fbbf24;
+      background: rgba(251, 191, 36, 0.08);
+      border: 1px solid rgba(251, 191, 36, 0.2);
+      padding: 0.15rem 0.45rem;
+      border-radius: 4px;
+      margin-left: 0.25rem;
+      cursor: help;
+      text-transform: none;
+      letter-spacing: 0;
+      transition: var(--transition);
+    }
+
+    .card-body {
+      margin-bottom: 1.5rem;
+    }
+
+    .service-url {
+      font-size: 0.85rem;
+      color: var(--primary);
+      font-weight: 500;
+      word-break: break-all;
+      transition: var(--transition);
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+    }
+
+    .service-url:hover {
+      color: #818cf8;
+      text-decoration: underline;
+    }
+
+    .card-footer {
+      display: flex;
+      gap: 0.75rem;
+    }
+
+    /* Botones */
+    .btn {
+      flex-grow: 1;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      padding: 0.65rem 1rem;
+      font-size: 0.85rem;
+      font-weight: 600;
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(255, 255, 255, 0.03);
+      color: var(--text-main);
+      cursor: pointer;
+      transition: var(--transition);
+    }
+
+    .btn:hover {
+      background: rgba(255, 255, 255, 0.08);
+      transform: translateY(-1px);
+    }
+
+    .btn-primary {
+      background: var(--primary);
+      border-color: transparent;
+    }
+
+    .btn-primary:hover {
+      background: var(--primary-hover);
+      box-shadow: 0 0 15px rgba(99, 102, 241, 0.4);
+    }
+
+    .btn-start {
+      background: rgba(16, 185, 129, 0.08);
+      border-color: rgba(16, 185, 129, 0.25);
+      color: #34d399;
+    }
+
+    .btn-start:hover {
+      background: rgba(16, 185, 129, 0.18);
+      border-color: rgba(16, 185, 129, 0.4);
+      box-shadow: 0 0 15px rgba(16, 185, 129, 0.15);
+      transform: translateY(-1px);
+    }
+
+    .btn-stop {
+      background: rgba(239, 68, 68, 0.08);
+      border-color: rgba(239, 68, 68, 0.25);
+      color: #f87171;
+    }
+
+    .btn-stop:hover {
+      background: rgba(239, 68, 68, 0.18);
+      border-color: rgba(239, 68, 68, 0.4);
+      box-shadow: 0 0 15px rgba(239, 68, 68, 0.15);
+      transform: translateY(-1px);
+    }
+
+    .btn:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+      transform: none !important;
+      box-shadow: none !important;
+      background: rgba(255, 255, 255, 0.02) !important;
+      border-color: rgba(255, 255, 255, 0.04) !important;
+      color: var(--text-muted) !important;
+    }
+
+    /* Visor de terminal de logs (Modal) */
+    .modal-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      background: rgba(5, 6, 12, 0.85);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      z-index: 100;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.3s ease;
+    }
+
+    .modal-overlay.active {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .modal-content {
+      background: #090c15;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      width: 90%;
+      max-width: 900px;
+      height: 80vh;
+      border-radius: 16px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      box-shadow: 0 30px 60px -15px rgba(0, 0, 0, 0.8);
+      transform: translateY(20px);
+      transition: transform 0.3s ease;
+    }
+
+    .modal-overlay.active .modal-content {
+      transform: translateY(0);
+    }
+
+    .modal-header {
+      padding: 1.25rem 1.5rem;
+      background: rgba(255, 255, 255, 0.02);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .modal-title {
+      font-size: 1.1rem;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .modal-actions {
+      display: flex;
+      gap: 0.5rem;
+    }
+
+    .btn-icon {
+      width: 32px;
+      height: 32px;
+      border-radius: 6px;
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      background: rgba(255, 255, 255, 0.03);
+      color: var(--text-muted);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: var(--transition);
+    }
+
+    .btn-icon:hover {
+      background: rgba(255, 255, 255, 0.08);
+      color: #ffffff;
+    }
+
+    .terminal-body {
+      flex-grow: 1;
+      background: #04060b;
+      padding: 1.5rem;
+      overflow-y: auto;
+      font-family: 'Fira Code', 'Consolas', monospace;
+      font-size: 0.85rem;
+      line-height: 1.5;
+      color: #d1d5db;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    /* Scrollbar estilizada */
+    .terminal-body::-webkit-scrollbar {
+      width: 8px;
+    }
+    .terminal-body::-webkit-scrollbar-track {
+      background: #04060b;
+    }
+    .terminal-body::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 4px;
+    }
+    .terminal-body::-webkit-scrollbar-thumb:hover {
+      background: rgba(255, 255, 255, 0.2);
+    }
+
+    /* Footer */
+    footer {
+      text-align: center;
+      padding: 2rem;
+      color: var(--text-muted);
+      font-size: 0.8rem;
+      border-top: 1px solid rgba(255, 255, 255, 0.03);
+      margin-top: auto;
+    }
+
+    /* Responsive */
+    @media (max-width: 640px) {
+      header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 1.5rem;
+      }
+      .global-status {
+        width: 100%;
+        justify-content: center;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <!-- Header -->
+    <header>
+      <div class="brand">
+        <h1>Proyectos IA</h1>
+        <p>Dashboard de Control e Infraestructura Local</p>
+      </div>
+      <div id="globalStatus" class="global-status">
+        <span id="orchestratorBadge" class="orchestrator-badge" style="display: none;">Standalone</span>
+        <span id="globalStatusDot" class="status-dot status-offline"></span>
+        <span id="globalStatusText">Verificando...</span>
+      </div>
+    </header>
+
+    <!-- Grid de Servicios -->
+    <div class="services-grid" id="servicesGrid">
+      <!-- Los servicios se inyectan dinámicamente mediante JS -->
+    </div>
+  </div>
+
+  <!-- Modal de Logs -->
+  <div class="modal-overlay" id="logModal" onclick="closeLogsModal()">
+    <div class="modal-content" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <div class="modal-title">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="4 17 10 11 4 5"></polyline>
+            <line x1="12" y1="19" x2="20" y2="19"></line>
+          </svg>
+          Console Logs: <span id="logModalServiceName" style="color: var(--primary);">service-name</span>
+        </div>
+        <div class="modal-actions">
+          <button class="btn-icon" onclick="fetchLogs()" title="Recargar logs" id="btnRefreshLogs">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"></path>
+            </svg>
+          </button>
+          <button class="btn-icon" onclick="copyLogs()" title="Copiar al portapapeles" id="btnCopyLogs">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+          </button>
+          <button class="btn-icon" onclick="closeLogsModal()" title="Cerrar ventana" id="btnCloseLogs">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
+        </div>
+      </div>
+      <div class="terminal-body" id="logTerminal">Cargando logs...</div>
+    </div>
+  </div>
+
+  <footer>
+    <p>Suite de Agentes Autónomos local. IA_Infraestructura v1.0.0</p>
+  </footer>
+
+  <!-- Lógica JavaScript -->
+  <script>
+    // Configuración estática mapeada en consonancia con el server.js
+    const SERVICES_MAP = {
+      'git': { name: 'infra-github', port: 3100 },
+      'fb': { name: 'infra-firebase', port: 3200 },
+      'proj': { name: 'infra-project-creator', port: 3300 },
+      'dns': { name: 'infra-domain-manager', port: 3400 },
+      'design': { name: 'api-design-assets', port: 3500 },
+      'rag': { name: 'api-conocimiento-rag', port: 3600 },
+      'scrape': { name: 'api-utilidades-scraping', port: 3700 },
+      'gw': { name: 'infra-gateway', port: 3000 }
+    };
+
+    let activeServiceLog = null;
+
+    // Inicializar el grid de servicios
+    function initGrid() {
+      const grid = document.getElementById('servicesGrid');
+      grid.innerHTML = '';
+
+      Object.entries(SERVICES_MAP).forEach(([key, svc]) => {
+        // Omitir gateway del grid normal para simplificar
+        if (key === 'gw') return;
+
+        const card = document.createElement('div');
+        card.className = 'service-card';
+        card.id = `card-${svc.name}`;
+        card.innerHTML = `
+          <div class="card-header">
+            <div class="service-info">
+              <span class="service-name">${svc.name}</span>
+              <span class="service-port">Puerto ${svc.port}</span>
+            </div>
+            <div class="card-status">
+              <span class="status-dot" id="dot-${svc.name}"></span>
+              <span id="statusText-${svc.name}">Desconectado</span>
+              <span id="envAlert-${svc.name}" class="env-alert" style="display: none;" title="Falta configurar archivo .env">⚠️ Sin .env</span>
+            </div>
+          </div>
+          <div class="card-body">
+            <a href="http://localhost:${svc.port}/" target="_blank" class="service-url" id="link-${svc.name}">
+              http://localhost:${svc.port}/
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                <polyline points="15 3 21 3 21 9"></polyline>
+                <line x1="10" y1="14" x2="21" y2="3"></line>
+              </svg>
+            </a>
+          </div>
+          <div class="card-footer">
+            <button class="btn" onclick="openLogs('${svc.name}')" id="btnLogs-${svc.name}">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+              </svg>
+              Logs
+            </button>
+            <button class="btn" onclick="toggleService('${svc.name}')" id="btnControl-${svc.name}">
+              Iniciar
+            </button>
+          </div>
+        `;
+        grid.appendChild(card);
+      });
+    }
+
+    // Consultar el estado de salud de todos los servicios
+    async function checkHealth() {
+      try {
+        const res = await fetch('/api/health');
+        const data = await res.json();
+
+        if (data.ok && data.data) {
+          updateUI(data.data);
+        } else {
+          setDegradedUI();
+        }
+      } catch (err) {
+        setOfflineUI();
+      }
+    }
+
+    // Actualizar los estados en la interfaz basándonos en la respuesta del health check
+    function updateUI(healthData) {
+      // Estado Global
+      const globalDot = document.getElementById('globalStatusDot');
+      const globalText = document.getElementById('globalStatusText');
+      const overall = healthData.overallStatus; // 'healthy', 'degraded', 'critical'
+
+      // Detección de orquestador PM2
+      const orchestratorBadge = document.getElementById('orchestratorBadge');
+      if (orchestratorBadge) {
+        orchestratorBadge.style.display = 'inline-block';
+        if (healthData.orchestrator === 'pm2') {
+          orchestratorBadge.className = 'orchestrator-badge badge-pm2';
+          orchestratorBadge.textContent = 'PM2';
+          orchestratorBadge.title = 'Servicios gestionados y orquestados por PM2';
+        } else {
+          orchestratorBadge.className = 'orchestrator-badge badge-standalone';
+          orchestratorBadge.textContent = 'Standalone';
+          orchestratorBadge.title = 'Servicios iniciados de forma independiente con Node';
+        }
+      }
+
+      globalDot.className = 'status-dot pulse';
+      if (overall === 'healthy') {
+        globalDot.classList.add('status-online');
+        globalText.textContent = 'Infraestructura Correcta';
+        globalText.style.color = 'var(--color-online)';
+      } else if (overall === 'degraded') {
+        globalDot.classList.add('status-degraded');
+        globalText.textContent = 'Rendimiento Degradado';
+        globalText.style.color = 'var(--color-degraded)';
+      } else {
+        globalDot.classList.add('status-offline');
+        globalText.textContent = 'Estado Crítico';
+        globalText.style.color = 'var(--color-offline)';
+      }
+
+      // Servicios individuales
+      const services = healthData.services;
+      Object.entries(SERVICES_MAP).forEach(([key, svc]) => {
+        if (key === 'gw') return; // El Gateway lo manejamos globalmente arriba
+
+        // Buscar correspondencia en la respuesta del health check
+        const responseSvc = Object.values(services).find(s => s.name === svc.name);
+        const cardDot = document.getElementById(`dot-${svc.name}`);
+        const cardText = document.getElementById(`statusText-${svc.name}`);
+        const btnControl = document.getElementById(`btnControl-${svc.name}`);
+        const envAlert = document.getElementById(`envAlert-${svc.name}`);
+
+        if (envAlert) {
+          if (responseSvc && responseSvc.envExists === false) {
+            envAlert.style.display = 'inline-flex';
+          } else {
+            envAlert.style.display = 'none';
+          }
+        }
+
+        if (responseSvc && responseSvc.status === 'online') {
+          cardDot.className = 'status-dot status-online';
+          const latencyText = responseSvc.latencyMs !== null && responseSvc.latencyMs !== undefined ? ` · ${responseSvc.latencyMs}ms` : '';
+          cardText.textContent = `Activo${latencyText}`;
+          
+          if (responseSvc.latencyMs >= 500) {
+            cardText.style.color = 'var(--color-offline)';
+          } else if (responseSvc.latencyMs >= 100) {
+            cardText.style.color = 'var(--color-degraded)';
+          } else {
+            cardText.style.color = 'var(--color-online)';
+          }
+          
+          if (btnControl && btnControl.dataset.processing !== 'true') {
+            btnControl.className = 'btn btn-stop';
+            btnControl.disabled = false;
+            btnControl.innerHTML = `
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+              </svg>
+              Detener
+            `;
+          }
+        } else {
+          cardDot.className = 'status-dot status-offline';
+          cardText.textContent = 'Detenido';
+          cardText.style.color = 'var(--color-offline)';
+          
+          if (btnControl && btnControl.dataset.processing !== 'true') {
+            btnControl.className = 'btn btn-start';
+            btnControl.disabled = false;
+            btnControl.innerHTML = `
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polygon points="5 3 19 12 5 21 5 3"></polygon>
+              </svg>
+              Iniciar
+            `;
+          }
+        }
+      });
+    }
+
+    function setDegradedUI() {
+      const globalDot = document.getElementById('globalStatusDot');
+      const globalText = document.getElementById('globalStatusText');
+      globalDot.className = 'status-dot status-degraded';
+      globalText.textContent = 'Error de comunicación';
+      globalText.style.color = 'var(--color-degraded)';
+    }
+
+    function setOfflineUI() {
+      const globalDot = document.getElementById('globalStatusDot');
+      const globalText = document.getElementById('globalStatusText');
+      globalDot.className = 'status-dot status-offline';
+      globalText.textContent = 'Gateway Desconectado';
+      globalText.style.color = 'var(--color-offline)';
+
+      const orchestratorBadge = document.getElementById('orchestratorBadge');
+      if (orchestratorBadge) {
+        orchestratorBadge.style.display = 'none';
+      }
+
+      // Poner todos los servicios a offline
+      Object.values(SERVICES_MAP).forEach(svc => {
+        if (svc.name === 'infra-gateway') return;
+        const cardDot = document.getElementById(`dot-${svc.name}`);
+        const cardText = document.getElementById(`statusText-${svc.name}`);
+        const btnControl = document.getElementById(`btnControl-${svc.name}`);
+        
+        if (cardDot) cardDot.className = 'status-dot status-offline';
+        if (cardText) {
+          cardText.textContent = 'Desconectado';
+          cardText.style.color = 'var(--text-muted)';
+        }
+        if (btnControl) {
+          btnControl.disabled = true;
+          btnControl.className = 'btn';
+          btnControl.innerHTML = 'Iniciar';
+        }
+      });
+    }
+
+    // Encender o apagar un servicio desde el dashboard
+    async function toggleService(serviceName) {
+      const btnControl = document.getElementById(`btnControl-${serviceName}`);
+      if (!btnControl) return;
+
+      const isOnline = btnControl.classList.contains('btn-stop');
+      const action = isOnline ? 'stop' : 'start';
+      
+      if (action === 'stop') {
+        const confirmStop = confirm(`⚠️ ¿Estás seguro de que deseas detener el servicio "${serviceName}"?`);
+        if (!confirmStop) return;
+      }
+      
+      btnControl.disabled = true;
+      btnControl.dataset.processing = 'true';
+      btnControl.innerHTML = `
+        <span class="status-dot pulse" style="background-color: var(--text-muted); width: 8px; height: 8px; display: inline-block;"></span>
+        ${action === 'start' ? 'Iniciando...' : 'Deteniendo...'}
+      `;
+
+      try {
+        const res = await fetch(`/api/gateway/services/${serviceName}/${action}`, {
+          method: 'POST'
+        });
+        const data = await res.json();
+        
+        if (!data.ok) {
+          alert(`Error al ${action === 'start' ? 'iniciar' : 'detener'} el servicio: ${data.message || 'Error desconocido'}`);
+        }
+      } catch (err) {
+        alert(`Error de red al intentar ${action === 'start' ? 'iniciar' : 'detener'} el servicio: ${err.message}`);
+      } finally {
+        delete btnControl.dataset.processing;
+        // Esperar brevemente a que el puerto se asiente y actualizar
+        setTimeout(checkHealth, 800);
+      }
+    }
+
+    // Abrir visor de logs
+    function openLogs(serviceName) {
+      activeServiceLog = serviceName;
+      document.getElementById('logModalServiceName').textContent = serviceName;
+      document.getElementById('logModal').classList.add('active');
+      document.getElementById('logTerminal').textContent = 'Cargando logs...';
+      fetchLogs();
+    }
+
+    // Cerrar visor de logs
+    function closeLogsModal() {
+      document.getElementById('logModal').classList.remove('active');
+      activeServiceLog = null;
+    }
+
+    // Obtener logs del servidor
+    async function fetchLogs() {
+      if (!activeServiceLog) return;
+      
+      const terminal = document.getElementById('logTerminal');
+      try {
+        const res = await fetch(`/api/gateway/logs/${activeServiceLog}`);
+        const data = await res.json();
+        if (data.ok && data.logs) {
+          terminal.textContent = data.logs;
+          // Hacer auto-scroll al final del log
+          terminal.scrollTop = terminal.scrollHeight;
+        } else {
+          terminal.textContent = `[ERROR] No se pudieron cargar los logs: ${data.message || 'Error desconocido'}`;
+        }
+      } catch (err) {
+        terminal.textContent = `[ERROR] Excepción al consultar logs: ${err.message}`;
+      }
+    }
+
+    // Copiar logs al portapapeles
+    function copyLogs() {
+      const logsText = document.getElementById('logTerminal').textContent;
+      navigator.clipboard.writeText(logsText).then(() => {
+        const btn = document.getElementById('btnCopyLogs');
+        const oldHTML = btn.innerHTML;
+        btn.innerHTML = `
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2">
+            <polyline points="20 6 9 17 4 12"></polyline>
+          </svg>
+        `;
+        setTimeout(() => btn.innerHTML = oldHTML, 1500);
+      });
+    }
+
+    // Inicialización y bucle de polling
+    initGrid();
+    checkHealth();
+    setInterval(checkHealth, 4000);
+  </script>
+</body>
+</html>

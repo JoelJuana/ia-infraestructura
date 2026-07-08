@@ -3,7 +3,7 @@ const { spawn } = require('child_process');
 const path = require('path');
 const { BASE_PROYECTOS_DIR } = require('../config/env');
 
-const DOMINIOS_API_PORT = 4200;
+const DOMINIOS_API_PORT = process.env.DOMAIN_MANAGER_PORT || 3400;
 const DOMINIOS_API_URL = `http://localhost:${DOMINIOS_API_PORT}`;
 
 /**
@@ -21,7 +21,7 @@ function ensureDominiosRunning() {
     
     req.on('error', () => {
       console.log('Iniciando gestion-dominios...');
-      const serverPath = path.join(BASE_PROYECTOS_DIR, 'infra', 'infra-domain-manager');
+      const serverPath = path.resolve(__dirname, '..', '..', 'infra-domain-manager');
       
       const process = spawn('node', ['server.js'], {
         cwd: serverPath,
