@@ -247,25 +247,7 @@ async function startAll(targetSvcName) {
   console.log(`  Health check:          http://localhost:3000/api/health`);
   console.log(`  Logs en:               .infra-logs/`);
   console.log(`  Para detener:          npm run stop`);
-  console.log(`==================================================${colors.reset}\n`);
-
-  const gatewayInUse = await isPortInUse(3000);
-  if (gatewayInUse) {
-    try {
-      const isWin = process.platform === 'win32';
-      if (isWin) {
-        exec('start http://localhost:3000');
-      } else if (process.platform === 'darwin') {
-        exec('open http://localhost:3000');
-      } else {
-        exec('xdg-open http://localhost:3000');
-      }
-      console.log(`  ${colors.cyan}[INFO] Visor de logs abierto automaticamente en el navegador.${colors.reset}\n`);
-    } catch (e) {
-      // Ignorar fallos de apertura de navegador
-    }
-  }
-}
+  console.log(`==================================================${colors.reset}\n`);}
 
 /**
  * Detiene todos los microservicios.
