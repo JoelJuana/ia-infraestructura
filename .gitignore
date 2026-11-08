@@ -4,27 +4,24 @@ dist/
 build/
 *.log
 
-# Entornos locales y credenciales (contienen tokens y claves privadas)
+# Entornos locales y credenciales
 .env
 .env.local
 .env.*.local
-*serviceAccountKey*.json
-firebase_deploy_temp*.json
-.firebase/
-
-# Datos persistentes locales y caché temporal
-api-conocimiento-rag/data/store.json
-scratch/
+**/serviceAccountKey*.json
+**/firebase_deploy_temp*.json
+**/.firebase/
 
 # Logs de infraestructura
 .infra-logs/
 
 # Backups de Git antiguos
 .git_backup/
+**/.git_backup/
 
 # Archivos del sistema
 .DS_Store
 Thumbs.db
 
-# Lock files (cada servicio tiene el suyo, pero no es necesario versionarlos)
+# Lock files
 package-lock.json

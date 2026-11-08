@@ -142,7 +142,7 @@ describe('Suite de Pruebas - API de Scaffolding y Automatización', () => {
     it('Debería comprobar que la carpeta del proyecto se haya creado en la sandbox', (done) => {
       // Dar un pequeño timeout para la ejecución asíncrona del Scaffolder
       setTimeout(() => {
-        const createdPath = path.join(sandboxPath, testProjName);
+        const createdPath = path.join(sandboxPath, 'apps', testProjName);
         expect(fs.existsSync(createdPath)).toBe(true);
         expect(fs.existsSync(path.join(createdPath, 'package.json'))).toBe(true);
         expect(fs.existsSync(path.join(createdPath, 'README.md'))).toBe(true);
@@ -170,11 +170,11 @@ describe('Suite de Pruebas - API de Scaffolding y Automatización', () => {
       expect(res.body).toHaveProperty('success', true);
       
       // Comprobar renombrado físico
-      expect(fs.existsSync(path.join(sandboxPath, testProjName))).toBe(false);
-      expect(fs.existsSync(path.join(sandboxPath, renamedProjName))).toBe(true);
+      expect(fs.existsSync(path.join(sandboxPath, 'apps', testProjName))).toBe(false);
+      expect(fs.existsSync(path.join(sandboxPath, 'apps', renamedProjName))).toBe(true);
 
       // Comprobar package.json renombrado
-      const pkg = JSON.parse(fs.readFileSync(path.join(sandboxPath, renamedProjName, 'package.json'), 'utf8'));
+      const pkg = JSON.parse(fs.readFileSync(path.join(sandboxPath, 'apps', renamedProjName, 'package.json'), 'utf8'));
       expect(pkg.name).toBe(renamedProjName.toLowerCase());
     });
 
@@ -186,7 +186,7 @@ describe('Suite de Pruebas - API de Scaffolding y Automatización', () => {
       expect(res.body).toHaveProperty('success', true);
 
       // Comprobar eliminación física
-      expect(fs.existsSync(path.join(sandboxPath, renamedProjName))).toBe(false);
+      expect(fs.existsSync(path.join(sandboxPath, 'apps', renamedProjName))).toBe(false);
 
       // Comprobar remoción del catálogo projects.json
       const projectsJson = JSON.parse(fs.readFileSync(path.join(sandboxPath, 'projects.json'), 'utf8'));

@@ -147,12 +147,14 @@ async function updateProjectCNAME(oldName, newName) {
   const dnsRecordsRes = await callDominiosAPI('/api/dns/records', 'GET');
   let oldRecordId = null;
   let oldRecordContent = 'joeljuana.github.io';
+  let oldRecordProxied = true;
   
   if (dnsRecordsRes.success && dnsRecordsRes.records) {
     const matchRecord = dnsRecordsRes.records.find(r => r.name.startsWith(cleanOld + '.'));
     if (matchRecord) {
       oldRecordId = matchRecord.id;
       oldRecordContent = matchRecord.content;
+      oldRecordProxied = matchRecord.proxied !== undefined ? matchRecord.proxied : !oldRecordContent.endsWith('.web.app');
     }
   }
   
@@ -167,11 +169,11 @@ async function updateProjectCNAME(oldName, newName) {
     }
   }
   
-  // 3. Crear el nuevo registro DNS CNAME
+  // 3. Crear el nuevo registro DNS CNAME preservando configuración de proxy
   const createRes = await callDominiosAPI('/api/dns/cname', 'POST', {
     name: cleanNew,
     content: oldRecordContent,
-    proxied: true
+    proxied: oldRecordProxied
   });
   
   let createMsg = '';

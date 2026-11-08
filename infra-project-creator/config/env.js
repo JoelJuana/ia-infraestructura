@@ -8,7 +8,8 @@ if (fs.existsSync(localEnvPath)) {
 }
 
 const PORT = parseInt(process.env.PORT || '3300', 10);
-const BASE_PROYECTOS_DIR = process.env.BASE_PROYECTOS_DIR || path.resolve(__dirname, '..', '..');
+const defaultProyectosDir = path.resolve(__dirname, '..', '..', '..', 'IA_Proyectos');
+const BASE_PROYECTOS_DIR = process.env.BASE_PROYECTOS_DIR || (fs.existsSync(defaultProyectosDir) ? defaultProyectosDir : path.resolve(__dirname, '..', '..'));
 
 // Intentar cargar variables de entorno del CMS de GitHub para autenticación e Issues
 const githubEnvPath = path.resolve(__dirname, '..', '..', 'infra-github', '.env');

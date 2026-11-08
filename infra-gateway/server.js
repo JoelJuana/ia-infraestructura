@@ -13,12 +13,13 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Helper para ejecutar comandos en el runner de forma asíncrona
-function runServiceCommand(action, serviceName) {
+function runServiceCommand(action, serviceName = '') {
   return new Promise((resolve) => {
     const runnerPath = path.resolve(__dirname, '..', 'scripts', 'infra-runner.js');
-    exec(`node "${runnerPath}" ${action} ${serviceName}`, (error, stdout, stderr) => {
+    const arg = serviceName ? ` ${serviceName}` : '';
+    exec(`node "${runnerPath}" ${action}${arg}`, (error, stdout, stderr) => {
       if (error) {
-        console.error(`Error al ejecutar runner (${action} ${serviceName}):`, error);
+        console.error(`Error al ejecutar runner (${action}${arg}):`, error);
         resolve({ ok: false, error: error.message, output: stderr || stdout });
       } else {
         resolve({ ok: true, output: stdout });
@@ -29,6 +30,35 @@ function runServiceCommand(action, serviceName) {
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// ─── Watchdog de Auto-Apagado por Inactividad (protección ARM64) ────────────
+const IDLE_TIMEOUT_MIN = Number(process.env.GATEWAY_IDLE_TIMEOUT_MIN || 30);
+let lastActivityTimestamp = Date.now();
+
+function recordActivity(reqUrl) {
+  // No reiniciar el contador por sondeig pasivo del Dashboard
+  if (
+    reqUrl === '/ping' ||
+    reqUrl.startsWith('/api/health') ||
+    reqUrl.startsWith('/api/gateway/logs')
+  ) {
+    return;
+  }
+  lastActivityTimestamp = Date.now();
+}
+
+if (IDLE_TIMEOUT_MIN > 0) {
+  const checkInterval = setInterval(async () => {
+    const idleMs = Date.now() - lastActivityTimestamp;
+    if (idleMs >= IDLE_TIMEOUT_MIN * 60 * 1000) {
+      console.log(`[WATCHDOG] Inactividad de ${IDLE_TIMEOUT_MIN} min alcanzada. Apagando suite automáticamente...`);
+      clearInterval(checkInterval);
+      await runServiceCommand('stop', 'all');
+      process.exit(0);
+    }
+  }, 60 * 1000);
+  checkInterval.unref();
+}
 
 // ─── Configuración de servicios ─────────────────────────────────────────────
 const SERVICES = {
@@ -41,10 +71,17 @@ const SERVICES = {
   scrape:   { target: process.env.SERVICE_SCRAPE     || 'http://localhost:3700', name: 'api-utilidades-scraping', dir: 'api-utilidades-scraping', requiresEnv: false },
 };
 
+const VALID_SERVICES = [
+  'infra-github', 'infra-firebase', 'infra-project-creator',
+  'infra-domain-manager', 'api-design-assets', 'api-conocimiento-rag',
+  'api-utilidades-scraping', 'infra-gateway'
+];
+
 // ─── Middleware global ──────────────────────────────────────────────────────
 app.use(cors());
-app.use(express.static(path.join(__dirname, 'public'))); // Servir interfaz estática (Dashboard)
-app.use((req, res, next) => {
+app.use(express.static(path.join(__dirname, 'public')));
+app.use((req, _res, next) => {
+  recordActivity(req.url);
   console.log(`[GW REQUEST] ${req.method} ${req.url}`);
   next();
 });
@@ -60,7 +97,7 @@ app.get('/api/health', async (_req, res) => {
     const start = Date.now();
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 2000);
+      const timeout = setTimeout(() => controller.abort(), 1500);
       const response = await fetch(`${svc.target}/ping`, { signal: controller.signal });
       clearTimeout(timeout);
       const latency = Date.now() - start;
@@ -86,9 +123,10 @@ app.get('/api/health', async (_req, res) => {
 
   await Promise.all(checks);
 
-  const allOnline = Object.values(results).every(r => r.status === 'online');
-  const anyOnline = Object.values(results).some(r => r.status === 'online');
+  const allOnline = Object.values(results).every((r) => r.status === 'online');
+  const anyOnline = Object.values(results).some((r) => r.status === 'online');
   const orchestrator = process.env.pm_id !== undefined ? 'pm2' : 'standalone';
+  const idleMinutes = Math.floor((Date.now() - lastActivityTimestamp) / 60000);
 
   res.json({
     ok: true,
@@ -97,11 +135,13 @@ app.get('/api/health', async (_req, res) => {
       overallStatus: allOnline ? 'healthy' : anyOnline ? 'degraded' : 'critical',
       services: results,
       orchestrator,
+      idleMinutes,
+      idleTimeoutMinutes: IDLE_TIMEOUT_MIN,
       timestamp: new Date().toISOString()
     },
     message: allOnline
       ? 'Todos los servicios están operativos.'
-      : `Algunos servicios no están disponibles.`
+      : 'Algunos servicios no están disponibles.'
   });
 });
 
@@ -111,7 +151,7 @@ app.get('/api/gateway/info', (_req, res) => {
     ok: true,
     data: {
       name: 'Proyectos IA — API Gateway',
-      version: '1.0.0',
+      version: '1.1.0',
       port: PORT,
       routes: Object.entries(SERVICES).map(([prefix, svc]) => ({
         path: `/api/${prefix}/*`,
@@ -124,20 +164,38 @@ app.get('/api/gateway/info', (_req, res) => {
   });
 });
 
-// ─── Endpoint de logs de servicios ──────────────────────────────────────────
+// ─── Endpoint de logs de servicios (individual o 'all' para Consola Global) ─
 app.get('/api/gateway/logs/:service', (req, res) => {
   const { service } = req.params;
-  const validServices = [
-    'infra-github', 'infra-firebase', 'infra-project-creator', 
-    'infra-domain-manager', 'api-design-assets', 'api-conocimiento-rag', 
-    'api-utilidades-scraping', 'infra-gateway'
-  ];
+  const logDir = path.resolve(__dirname, '..', '.infra-logs');
 
-  if (!validServices.includes(service)) {
+  if (service === 'all') {
+    try {
+      const combined = [];
+      for (const svcName of VALID_SERVICES) {
+        const file = path.join(logDir, `${svcName}.log`);
+        if (fs.existsSync(file)) {
+          const content = fs.readFileSync(file, 'utf-8').trim();
+          if (content) {
+            const tail = content.split('\n').slice(-40).join('\n');
+            combined.push(`=== [${svcName.toUpperCase()}] ===\n${tail}`);
+          }
+        }
+      }
+      return res.json({
+        ok: true,
+        logs: combined.length > 0 ? combined.join('\n\n') : '[RUNNER] Sin registros de logs activos.'
+      });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: 'READ_ERROR', message: err.message });
+    }
+  }
+
+  if (!VALID_SERVICES.includes(service)) {
     return res.status(400).json({ ok: false, error: 'INVALID_SERVICE', message: 'Servicio no válido.' });
   }
 
-  const logFile = path.resolve(__dirname, '..', '.infra-logs', `${service}.log`);
+  const logFile = path.join(logDir, `${service}.log`);
 
   if (!fs.existsSync(logFile)) {
     return res.json({ ok: true, logs: `[RUNNER] No se encontraron archivos de logs para el servicio ${service}.` });
@@ -146,28 +204,42 @@ app.get('/api/gateway/logs/:service', (req, res) => {
   try {
     const data = fs.readFileSync(logFile, 'utf-8');
     const lines = data.split('\n');
-    const lastLines = lines.slice(-250).join('\n'); // Devolver las últimas 250 líneas
+    const lastLines = lines.slice(-250).join('\n');
     res.json({ ok: true, logs: lastLines });
   } catch (err) {
     res.status(500).json({ ok: false, error: 'READ_ERROR', message: `Error al leer logs: ${err.message}` });
   }
 });
 
-// ─── Endpoints de Control de Servicios (Start/Stop) ─────────────────────────
+// ─── Endpoints de Control de Servicios (Start/Stop individual o 'all') ──────
 app.post('/api/gateway/services/:service/:action', async (req, res) => {
   const { service, action } = req.params;
-  const validServices = [
-    'infra-github', 'infra-firebase', 'infra-project-creator', 
-    'infra-domain-manager', 'api-design-assets', 'api-conocimiento-rag', 
-    'api-utilidades-scraping', 'infra-gateway'
-  ];
-
-  if (!validServices.includes(service)) {
-    return res.status(400).json({ ok: false, error: 'INVALID_SERVICE', message: 'Servicio no válido.' });
-  }
 
   if (action !== 'start' && action !== 'stop') {
     return res.status(400).json({ ok: false, error: 'INVALID_ACTION', message: 'Acción no válida. Usar start o stop.' });
+  }
+
+  if (service === 'all') {
+    if (action === 'start') {
+      const result = await runServiceCommand('start', 'all');
+      return res.status(result.ok ? 200 : 500).json({
+        ok: result.ok,
+        message: 'Todos los microservicios han sido iniciados.',
+        output: result.output
+      });
+    } else {
+      // Al detener todos desde el Dashboard, detenemos los 7 microservicios hijos manteniendo el Gateway activo
+      const childServices = VALID_SERVICES.filter((s) => s !== 'infra-gateway');
+      await Promise.all(childServices.map((svc) => runServiceCommand('stop', svc)));
+      return res.json({
+        ok: true,
+        message: 'Todos los microservicios de negocio han sido detenidos (Gateway en línea).'
+      });
+    }
+  }
+
+  if (!VALID_SERVICES.includes(service)) {
+    return res.status(400).json({ ok: false, error: 'INVALID_SERVICE', message: 'Servicio no válido.' });
   }
 
   const result = await runServiceCommand(action, service);
@@ -184,18 +256,15 @@ app.get('/', (_req, res) => {
     ok: true,
     data: {
       name: 'Proyectos IA — API Gateway',
-      version: '1.0.0',
+      version: '1.1.0',
       status: 'online',
       dashboard: 'active'
     },
-    message: 'Gateway operativo. Dashboard activo. Si no se visualiza la interfaz, comprueba que exista la carpeta public/ y sus archivos.'
+    message: 'Gateway operativo. Dashboard activo.'
   });
 });
 
 // ─── Proxy Middleware — Redirección a microservicios ────────────────────────
-// Cada prefijo /api/<key>/* se redirige al servicio correspondiente.
-// El prefijo /api/<key> se elimina antes de reenviar al servicio destino.
-
 for (const [prefix, svc] of Object.entries(SERVICES)) {
   app.use(
     `/api/${prefix}`,
@@ -203,16 +272,16 @@ for (const [prefix, svc] of Object.entries(SERVICES)) {
       target: svc.target,
       changeOrigin: true,
       pathRewrite: {
-        [`^/api/${prefix}/`]: '/',  // Reemplaza /api/prefijo/ por /
-        [`^/api/${prefix}$`]: '',   // Reemplaza /api/prefijo al final por vacio
+        [`^/api/${prefix}/`]: '/',
+        [`^/api/${prefix}$`]: '',
       },
       on: {
-        error: (err, _req, res) => {
+        error: (_err, _req, res) => {
           if (!res.headersSent) {
             res.status(503).json({
               ok: false,
               error: 'SERVICE_UNAVAILABLE',
-              message: `El servicio "${svc.name}" no está disponible en ${svc.target}. Arráncalo con "npm run start" o manualmente.`
+              message: `El servicio "${svc.name}" no está disponible en ${svc.target}. Arráncalo con "npm run start" o desde el Dashboard.`
             });
           }
         }
@@ -222,11 +291,11 @@ for (const [prefix, svc] of Object.entries(SERVICES)) {
 }
 
 // ─── Control del Gateway ────────────────────────────────────────────────────
-app.get('/ping', (req, res) => {
-  res.json({ status: 'ok' });
+app.get('/ping', (_req, res) => {
+  res.json({ status: 'ok', service: 'infra-gateway', port: PORT });
 });
 
-app.post('/api/gateway/shutdown', (req, res) => {
+app.post('/api/gateway/shutdown', (_req, res) => {
   res.json({ success: true, message: 'API Gateway apagándose...' });
   console.log('Recibida petición de apagado. Cerrando API Gateway...');
   setTimeout(() => {
@@ -236,7 +305,7 @@ app.post('/api/gateway/shutdown', (req, res) => {
 
 // ─── Ruta 404 para peticiones no mapeadas ───────────────────────────────────
 app.use((_req, res) => {
-  const availableRoutes = Object.keys(SERVICES).map(k => `/api/${k}/*`).join(', ');
+  const availableRoutes = Object.keys(SERVICES).map((k) => `/api/${k}/*`).join(', ');
   res.status(404).json({
     ok: false,
     error: 'ROUTE_NOT_FOUND',

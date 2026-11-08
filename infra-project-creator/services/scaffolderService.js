@@ -256,6 +256,8 @@ async function scaffoldProject(jobId, activeJobs, config) {
 
 const CRITICAL_FOLDERS = new Set([
   'infra-project-creator', 'infra-github', 'infra-domain-manager', 'infra-firebase', 'infra-gateway',
+  'api-design-assets', 'api-conocimiento-rag', 'api-utilidades-scraping',
+  'crear-proyecto', 'gestion-dominios', 'github', 'firebase', 'gateway',
   'apps', 'infra', '_plantillas', '_documentos', 'scripts', '.git', '.github', '.husky', 'node_modules', 'dist'
 ]);
 

@@ -24,7 +24,7 @@
         </div>
         <div class="brand-text">
           <h1>Proyectos IA</h1>
-          <span>Suite Local v1.0.0</span>
+          <span>Suite Local v1.1.0</span>
         </div>
       </div>
       
@@ -42,7 +42,7 @@
       <div class="sidebar-footer">
         <div class="machine-info">
           <span class="label"><i class="fa-solid fa-laptop"></i> DESKTOP-ARM64</span>
-          <span class="sub">Snapdragon X Elite</span>
+          <span class="sub">Snapdragon X Elite · Watchdog Activo</span>
         </div>
       </div>
     </aside>
@@ -57,6 +57,11 @@
         </div>
         
         <div class="header-stats">
+          <!-- Indicador de Inactividad / Watchdog -->
+          <div class="stat-badge" id="idle-badge" title="Tiempo sin actividad de negocio antes del auto-apagado">
+            <span class="label">INACTIVIDAD:</span>
+            <span class="value" id="idle-val">0m / 30m</span>
+          </div>
           <!-- Modo de Ejecución -->
           <div class="stat-badge" id="orchestrator-badge">
             <span class="label">MODO:</span>
@@ -70,14 +75,22 @@
         </div>
       </header>
 
-      <div class="dashboard-grid">
+      <div class="dashboard-grid" id="dashboard-grid">
         <!-- Grilla de Servicios -->
-        <section class="services-section">
+        <section class="services-section" id="services-section">
           <div class="section-header">
             <h3><i class="fa-solid fa-server"></i> Microservicios Orquestados</h3>
-            <button id="btn-refresh-all" class="btn-refresh" title="Refrescar estado de servicios">
-              <i class="fa-solid fa-rotate"></i>
-            </button>
+            <div class="section-actions">
+              <button id="btn-start-all" class="btn btn-start btn-sm" title="Arrancar todos los microservicios">
+                <i class="fa-solid fa-play"></i> Arrancar Todos
+              </button>
+              <button id="btn-stop-all" class="btn btn-stop btn-sm" title="Detener todos los microservicios de negocio">
+                <i class="fa-solid fa-stop"></i> Detener Todos
+              </button>
+              <button id="btn-refresh-all" class="btn-refresh" title="Refrescar estado de servicios">
+                <i class="fa-solid fa-rotate"></i>
+              </button>
+            </div>
           </div>
           
           <div class="services-grid" id="services-container">
@@ -105,7 +118,7 @@
           </div>
           
           <div class="terminal-container">
-            <pre class="terminal-body" id="terminal-content">Haz clic en el botón "Logs" de cualquier servicio para inspeccionar su consola en tiempo real...</pre>
+            <pre class="terminal-body" id="terminal-content">Haz clic en el botón "Logs" de cualquier servicio o en "Consola Global" para inspeccionar su salida en tiempo real...</pre>
           </div>
         </section>
       </div>

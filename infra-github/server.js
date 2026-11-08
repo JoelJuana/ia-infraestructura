@@ -131,10 +131,22 @@ app.post('/api/config', (req, res) => {
   }
 });
 
+// Helper para resolver la raíz del monorepositorio de proyectos (IA_Proyectos)
+function getProyectosRootPath() {
+  if (process.env.BASE_PROYECTOS_DIR && fs.existsSync(process.env.BASE_PROYECTOS_DIR)) {
+    return path.resolve(process.env.BASE_PROYECTOS_DIR);
+  }
+  const siblingProyectos = path.resolve(__dirname, '..', '..', 'IA_Proyectos');
+  if (fs.existsSync(siblingProyectos)) {
+    return siblingProyectos;
+  }
+  return path.join(__dirname, '..');
+}
+
 // Listar subproyectos en el monorepositorio local
 app.get('/api/projects', (req, res) => {
   try {
-    const rootPath = path.join(__dirname, '..');
+    const rootPath = getProyectosRootPath();
     const projectsJsonPath = path.join(rootPath, 'projects.json');
 
     if (fs.existsSync(projectsJsonPath)) {
@@ -142,11 +154,13 @@ app.get('/api/projects', (req, res) => {
       return res.json(JSON.parse(data));
     }
 
-    // Fallback: si no existe el JSON central, listar carpetas
-    const items = fs.readdirSync(rootPath);
+    // Fallback: si no existe el JSON central, listar carpetas en apps/ o raíz
+    const appsDir = path.join(rootPath, 'apps');
+    const scanPath = fs.existsSync(appsDir) ? appsDir : rootPath;
+    const items = fs.readdirSync(scanPath);
     const fallbackProjects = items
       .filter(item => {
-        const fullPath = path.join(rootPath, item);
+        const fullPath = path.join(scanPath, item);
         return (
           fs.statSync(fullPath).isDirectory() &&
           !item.startsWith('.') &&
@@ -1048,10 +1062,18 @@ app.post('/api/workflow', async (req, res) => {
 // --- Endpoints de Git Local (Estructura de Microservicios) ---
 const { exec } = require('child_process');
 
-// Helper para obtener el path local de un proyecto
+// Helper para obtener el path local de un proyecto (soportando apps/<projectName> y raíz)
 function getLocalProjectPath(projectName) {
-  const rootPath = path.join(__dirname, '..');
-  return path.resolve(rootPath, projectName);
+  const rootPath = getProyectosRootPath();
+  const inApps = path.resolve(rootPath, 'apps', projectName);
+  if (fs.existsSync(inApps)) {
+    return inApps;
+  }
+  const inRoot = path.resolve(rootPath, projectName);
+  if (fs.existsSync(inRoot)) {
+    return inRoot;
+  }
+  return path.resolve(__dirname, '..', projectName);
 }
 
 // GET: Estado local de Git

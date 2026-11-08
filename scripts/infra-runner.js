@@ -1,4 +1,4 @@
-import { spawn, execSync, exec } from 'child_process';
+import { spawn, execSync } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import net from 'net';
@@ -9,14 +9,14 @@ const __dirname = path.dirname(__filename);
 const ROOT = path.resolve(__dirname, '..');
 
 const SERVICES = [
-  { name: "infra-github",            port: 3100, dir: "infra-github",            cmd: "npm start" },
-  { name: "infra-firebase",          port: 3200, dir: "infra-firebase",          cmd: "npm start" },
-  { name: "infra-project-creator",   port: 3300, dir: "infra-project-creator",   cmd: "npm start" },
-  { name: "infra-domain-manager",    port: 3400, dir: "infra-domain-manager",    cmd: "npm start" },
-  { name: "api-design-assets",       port: 3500, dir: "api-design-assets",       cmd: "npm start" },
-  { name: "api-conocimiento-rag",    port: 3600, dir: "api-conocimiento-rag",    cmd: "npm start" },
-  { name: "api-utilidades-scraping", port: 3700, dir: "api-utilidades-scraping", cmd: "npm start" },
-  { name: "infra-gateway",           port: 3000, dir: "infra-gateway",           cmd: "npm start" }
+  { name: "infra-github",            port: 3100, dir: "infra-github",            script: "server.js" },
+  { name: "infra-firebase",          port: 3200, dir: "infra-firebase",          script: "server.js" },
+  { name: "infra-project-creator",   port: 3300, dir: "infra-project-creator",   script: "server.js" },
+  { name: "infra-domain-manager",    port: 3400, dir: "infra-domain-manager",    script: "server.js" },
+  { name: "api-design-assets",       port: 3500, dir: "api-design-assets",       script: "server.js" },
+  { name: "api-conocimiento-rag",    port: 3600, dir: "api-conocimiento-rag",    script: "server.js" },
+  { name: "api-utilidades-scraping", port: 3700, dir: "api-utilidades-scraping", script: "server.js" },
+  { name: "infra-gateway",           port: 3000, dir: "infra-gateway",           script: "server.js" }
 ];
 
 // Servicios que requieren configuración de variables de entorno (.env)
@@ -43,10 +43,10 @@ const colors = {
 function isPortInUse(port) {
   return new Promise((resolve) => {
     const client = new net.Socket();
-    client.setTimeout(400);
+    client.setTimeout(350);
     client.once('connect', () => {
       client.destroy();
-      resolve(true); // Conectó, por lo tanto está en uso
+      resolve(true);
     });
     client.once('timeout', () => {
       client.destroy();
@@ -90,9 +90,9 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function sendShutdownRequest(port) {
   try {
     const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), 1000);
-    const path = port === 3000 ? '/api/gateway/shutdown' : '/api/shutdown';
-    const res = await fetch(`http://127.0.0.1:${port}${path}`, {
+    const id = setTimeout(() => controller.abort(), 900);
+    const endpoint = port === 3000 ? '/api/gateway/shutdown' : '/api/shutdown';
+    const res = await fetch(`http://127.0.0.1:${port}${endpoint}`, {
       method: 'POST',
       signal: controller.signal
     });
@@ -104,37 +104,73 @@ async function sendShutdownRequest(port) {
 }
 
 /**
- * Detiene un proceso forzadamente según su puerto (específico del SO).
+ * Obtiene un mapa de puerto -> lista de PIDs en escucha (una sola llamada a netstat en Windows).
  */
-function killPort(port) {
+function getListeningPidsByPort(ports) {
+  const portSet = new Set(ports);
+  const pidMap = new Map();
+  for (const p of ports) pidMap.set(p, new Set());
+
   const isWin = process.platform === 'win32';
   try {
     if (isWin) {
-      const stdout = execSync('netstat -ano').toString();
-      const lines = stdout.split('\n');
-      const pids = [];
-      for (const line of lines) {
+      const stdout = execSync('netstat -ano -p tcp', { stdio: ['ignore', 'pipe', 'ignore'] }).toString();
+      for (const line of stdout.split('\n')) {
         const trimmed = line.trim();
-        if (!trimmed.includes('LISTENING')) continue;
+        if (!trimmed.startsWith('TCP')) continue;
         const parts = trimmed.split(/\s+/);
         if (parts.length < 5) continue;
         const localAddress = parts[1];
-        const pid = parts[4];
-        if (localAddress.endsWith(`:${port}`) && pid && pid !== '0') {
-          pids.push(pid);
+        const foreignAddress = parts[2];
+        const pid = parts[parts.length - 1];
+        // En sockets en escucha, la dirección remota termina en :0 o :*
+        if (!foreignAddress.endsWith(':0') && !foreignAddress.endsWith(':*')) continue;
+        const colonIdx = localAddress.lastIndexOf(':');
+        if (colonIdx !== -1 && pid && pid !== '0' && /^\d+$/.test(pid)) {
+          const portNum = Number(localAddress.slice(colonIdx + 1));
+          if (portSet.has(portNum)) {
+            pidMap.get(portNum).add(pid);
+          }
         }
       }
-      const uniquePids = [...new Set(pids)];
-      for (const pid of uniquePids) {
-        execSync(`taskkill /F /PID ${pid}`, { stdio: 'ignore' });
-      }
     } else {
-      execSync(`lsof -t -i:${port} | xargs kill -9`, { stdio: 'ignore' });
+      for (const port of ports) {
+        try {
+          const out = execSync(`lsof -t -i:${port}`, { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+          if (out) {
+            out.split('\n').forEach((pid) => pid && pidMap.get(port).add(pid.trim()));
+          }
+        } catch {
+          // Puerto sin proceso
+        }
+      }
     }
-    return true;
   } catch {
-    return false;
+    // Ignorar errores de inspección
   }
+  return pidMap;
+}
+
+/**
+ * Detiene forzosamente los procesos asociados a un puerto.
+ */
+function killPortPids(pids) {
+  if (!pids || pids.size === 0) return false;
+  const isWin = process.platform === 'win32';
+  let killedAny = false;
+  for (const pid of pids) {
+    try {
+      if (isWin) {
+        execSync(`taskkill /F /PID ${pid}`, { stdio: 'ignore' });
+      } else {
+        execSync(`kill -9 ${pid}`, { stdio: 'ignore' });
+      }
+      killedAny = true;
+    } catch {
+      // El proceso ya terminó
+    }
+  }
+  return killedAny;
 }
 
 /**
@@ -148,7 +184,6 @@ function rotateLogIfNeeded(serviceName) {
   try {
     if (fs.existsSync(logFile)) {
       const stats = fs.statSync(logFile);
-      // 5MB = 5 * 1024 * 1024 bytes
       if (stats.size > 5 * 1024 * 1024) {
         if (fs.existsSync(logFileOld)) {
           fs.unlinkSync(logFileOld);
@@ -163,16 +198,72 @@ function rotateLogIfNeeded(serviceName) {
 }
 
 /**
+ * Lanza un servicio en segundo plano desacoplado del Job Object de consola en Windows (vía WMI Win32_Process).
+ */
+function spawnServiceProcess(svc, svcPath, logFile) {
+  const logDir = path.dirname(logFile);
+  if (process.platform === 'win32') {
+    const tempBinDir = path.join(logDir, 'temp-bin');
+    if (!fs.existsSync(tempBinDir)) {
+      fs.mkdirSync(tempBinDir, { recursive: true });
+    }
+
+    const batFile = path.join(tempBinDir, `start-${svc.name}.bat`);
+    const batContent = `@echo off\r\nset PORT=${svc.port}\r\ncd /d "${svcPath}"\r\n"${process.execPath}" ${svc.script} >> "${logFile}" 2>&1\r\n`;
+    fs.writeFileSync(batFile, batContent, 'utf-8');
+
+    const vbsFile = path.join(tempBinDir, `start-${svc.name}.vbs`);
+    const vbsContent = `CreateObject("Wscript.Shell").Run "cmd.exe /c ""${batFile}""", 0, False\r\n`;
+    fs.writeFileSync(vbsFile, vbsContent, 'utf-8');
+
+    try {
+      // Ejecutar vía WMI (WmiPrvSE.exe) escapa de JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE en shells efímeras
+      const psCmd = `Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine='wscript.exe "${vbsFile}"'} | Out-Null`;
+      execSync(`powershell.exe -NoProfile -NonInteractive -Command "${psCmd.replace(/"/g, '\\"')}"`, {
+        stdio: 'ignore',
+        windowsHide: true
+      });
+    } catch {
+      const child = spawn('wscript.exe', [vbsFile], {
+        detached: true,
+        windowsHide: true,
+        stdio: 'ignore'
+      });
+      child.unref();
+    }
+  } else {
+    const logFd = fs.openSync(logFile, 'a');
+    try {
+      const child = spawn(process.execPath, [svc.script], {
+        cwd: svcPath,
+        env: { ...process.env, PORT: String(svc.port) },
+        detached: true,
+        stdio: ['ignore', logFd, logFd]
+      });
+      child.unref();
+    } finally {
+      try {
+        fs.closeSync(logFd);
+      } catch {
+        // Ignorar
+      }
+    }
+  }
+}
+
+/**
  * Arranca los microservicios de la infraestructura.
  */
 async function startAll(targetSvcName) {
-  const isGlobal = !targetSvcName;
+  const isGlobal = !targetSvcName || targetSvcName === 'all';
+  const normalizedTarget = isGlobal ? null : targetSvcName;
+
   if (isGlobal) {
     console.log(`\n${colors.cyan}==================================================${colors.reset}`);
     console.log(`${colors.cyan}     Proyectos IA - Arrancando Infraestructura     ${colors.reset}`);
     console.log(`${colors.cyan}==================================================${colors.reset}\n`);
   } else {
-    console.log(`\n${colors.cyan}--- Arrancando servicio individual: ${targetSvcName} ---${colors.reset}\n`);
+    console.log(`\n${colors.cyan}--- Arrancando servicio individual: ${normalizedTarget} ---${colors.reset}\n`);
   }
 
   const logDir = path.join(ROOT, '.infra-logs');
@@ -180,10 +271,11 @@ async function startAll(targetSvcName) {
     fs.mkdirSync(logDir, { recursive: true });
   }
 
-  for (const svc of SERVICES) {
-    if (targetSvcName && svc.name !== targetSvcName) {
-      continue;
-    }
+  const targetServices = normalizedTarget
+    ? SERVICES.filter((s) => s.name === normalizedTarget)
+    : SERVICES;
+
+  for (const svc of targetServices) {
     const svcPath = path.join(ROOT, svc.dir);
 
     if (!fs.existsSync(svcPath)) {
@@ -202,9 +294,10 @@ async function startAll(targetSvcName) {
       continue;
     }
 
-    // Auto-Bootstrap JIT (npm install si no existe node_modules)
-    const nodeModulesPath = path.join(svcPath, 'node_modules');
-    if (!fs.existsSync(nodeModulesPath)) {
+    // Auto-Bootstrap JIT (npm install si no existe node_modules ni en el servicio ni en la raíz del workspace)
+    const localNodeModules = path.join(svcPath, 'node_modules');
+    const rootNodeModules = path.join(ROOT, 'node_modules');
+    if (!fs.existsSync(localNodeModules) && !fs.existsSync(rootNodeModules)) {
       console.log(`  ${colors.yellow}[BOOTSTRAP] ${svc.name.padEnd(23)}: node_modules no encontrado. Instalando dependencias...${colors.reset}`);
       try {
         execSync('npm install', { cwd: svcPath, stdio: 'inherit' });
@@ -223,65 +316,27 @@ async function startAll(targetSvcName) {
       }
     }
 
-    // Rotar archivos de logs si exceden 5MB antes de arrancar
     rotateLogIfNeeded(svc.name);
 
-    console.log(`  ${colors.white}[START] Arrancando ${svc.name.padEnd(14)} en puerto ${svc.port}...${colors.reset}`);
-
+    console.log(`  ${colors.white}[START] Arrancando ${svc.name.padEnd(23)} en puerto ${svc.port}...${colors.reset}`);
     const logFile = path.join(logDir, `${svc.name}.log`);
-    const escapedLogFile = logFile.replace(/\\/g, '/');
-
-    if (process.platform === 'win32') {
-      // En Windows usamos wscript.exe para desacoplar completamente el proceso del Job Object de la consola
-      // y ejecutamos node.exe directamente (sin wrapper de npm) para ahorrar la mitad de procesos y RAM en ARM64.
-      const tempBinDir = path.join(logDir, 'temp-bin');
-      if (!fs.existsSync(tempBinDir)) {
-        fs.mkdirSync(tempBinDir, { recursive: true });
-      }
-
-      const batFile = path.join(tempBinDir, `start-${svc.name}.bat`);
-      const batContent = `@echo off\r\nset PORT=${svc.port}\r\ncd /d "${svcPath}"\r\n"${process.execPath}" server.js >> "${logFile}" 2>&1\r\n`;
-      fs.writeFileSync(batFile, batContent, 'utf-8');
-
-      const vbsFile = path.join(tempBinDir, `start-${svc.name}.vbs`);
-      const vbsContent = `CreateObject("Wscript.Shell").Run "cmd.exe /c ""${batFile}""", 0, False\r\n`;
-      fs.writeFileSync(vbsFile, vbsContent, 'utf-8');
-
-      const winCmd = `wscript.exe "${vbsFile}"`;
-      const child = exec(winCmd, { windowsHide: true });
-      child.unref();
-    } else {
-      const fullCommand = `PORT=${svc.port} "${process.execPath}" server.js >> "${escapedLogFile}" 2>&1`;
-      const child = spawn(fullCommand, {
-        cwd: svcPath,
-        detached: true,
-        stdio: 'ignore',
-        shell: true
-      });
-      child.unref();
-    }
-
-    await sleep(150);
+    spawnServiceProcess(svc, svcPath, logFile);
   }
 
   console.log(`\n${colors.cyan}--- Verificación de servicios ---${colors.reset}\n`);
 
-  const servicesToVerify = targetSvcName
-    ? SERVICES.filter(s => s.name === targetSvcName)
-    : SERVICES;
-
-  // Espera inteligente: comprobar cada 250ms hasta que todos los servicios objetivo estén escuchando (máx. 6s)
-  const maxWaitMs = 6000;
+  // Espera inteligente: comprobar cada 200ms hasta que todos los servicios objetivo estén escuchando (máx. 5s)
+  const maxWaitMs = 5000;
   const startWait = Date.now();
   while (Date.now() - startWait < maxWaitMs) {
-    const statuses = await Promise.all(servicesToVerify.map(s => isPortInUse(s.port)));
+    const statuses = await Promise.all(targetServices.map((s) => isPortInUse(s.port)));
     if (statuses.every(Boolean)) {
       break;
     }
-    await sleep(250);
+    await sleep(200);
   }
 
-  for (const svc of servicesToVerify) {
+  for (const svc of targetServices) {
     const inUse = await isPortInUse(svc.port);
     const padName = svc.name.padEnd(23);
     if (inUse) {
@@ -296,60 +351,97 @@ async function startAll(targetSvcName) {
   console.log(`  Health check:          http://localhost:3000/api/health`);
   console.log(`  Logs en:               .infra-logs/`);
   console.log(`  Para detener:          npm run stop`);
-  console.log(`==================================================${colors.reset}\n`);}
+  console.log(`==================================================${colors.reset}\n`);
+}
 
 /**
- * Detiene todos los microservicios.
+ * Detiene los microservicios de forma paralela y limpia.
  */
 async function stopAll(targetSvcName) {
-  const isGlobal = !targetSvcName;
+  const isGlobal = !targetSvcName || targetSvcName === 'all';
+  const normalizedTarget = isGlobal ? null : targetSvcName;
+
   if (isGlobal) {
     console.log(`\n${colors.yellow}==================================================${colors.reset}`);
     console.log(`${colors.yellow}     Proyectos IA - Deteniendo Infraestructura     ${colors.reset}`);
     console.log(`${colors.yellow}==================================================${colors.reset}\n`);
   } else {
-    console.log(`\n${colors.yellow}--- Deteniendo servicio individual: ${targetSvcName} ---${colors.reset}\n`);
+    console.log(`\n${colors.yellow}--- Deteniendo servicio individual: ${normalizedTarget} ---${colors.reset}\n`);
   }
+
+  const targetServices = normalizedTarget
+    ? SERVICES.filter((s) => s.name === normalizedTarget)
+    : SERVICES;
+
+  // 1. Comprobar en paralelo qué puertos están activos
+  const portStates = await Promise.all(
+    targetServices.map(async (svc) => ({
+      svc,
+      inUse: await isPortInUse(svc.port)
+    }))
+  );
+
+  // 2. Enviar petición de apagado controlado (/api/shutdown) en paralelo a los activos
+  const shutdownResults = await Promise.all(
+    portStates.map(async ({ svc, inUse }) => {
+      if (!inUse) return { svc, status: 'offline' };
+      const clean = await sendShutdownRequest(svc.port);
+      return { svc, status: clean ? 'stopped' : 'needs_kill' };
+    })
+  );
+
+  // Espera inteligente (hasta 1.5s) para que los procesos cierren su socket tras /api/shutdown
+  const activeToWait = shutdownResults.filter((r) => r.status === 'stopped').map((r) => r.svc.port);
+  if (activeToWait.length > 0) {
+    const startWait = Date.now();
+    while (Date.now() - startWait < 1500) {
+      const checks = await Promise.all(activeToWait.map((port) => isPortInUse(port)));
+      if (checks.every((inUse) => !inUse)) break;
+      await sleep(150);
+    }
+  }
+
+  // 3. Verificar si alguno sigue ocupando el puerto y forzar su cierre con una única consulta de red
+  const remainingChecks = await Promise.all(
+    shutdownResults.map(async (item) => ({
+      ...item,
+      stillInUse: item.status !== 'offline' ? await isPortInUse(item.svc.port) : false
+    }))
+  );
+
+  const portsNeedingKill = remainingChecks
+    .filter((r) => r.stillInUse)
+    .map((r) => r.svc.port);
+
+  const pidMap = portsNeedingKill.length > 0 ? getListeningPidsByPort(portsNeedingKill) : new Map();
 
   let stoppedCount = 0;
-
-  for (const svc of SERVICES) {
-    if (targetSvcName && svc.name !== targetSvcName) {
-      continue;
-    }
-    const inUse = await isPortInUse(svc.port);
-    const padName = svc.name.padEnd(23);
-
-    if (inUse) {
-      // Intentar primero apagado controlado
-      const cleanShutdown = await sendShutdownRequest(svc.port);
-      if (cleanShutdown) {
-        console.log(`  ${colors.red}[STOPPED] ${padName} detenido limpiamente (/api/shutdown)${colors.reset}`);
-        stoppedCount++;
-        await sleep(500);
-        continue;
-      }
-
-      // Si no responde, forzar cierre del puerto
-      const forceKilled = killPort(svc.port);
-      if (forceKilled) {
-        console.log(`  ${colors.red}[KILLED]  ${padName} detenido forzosamente (puerto ${svc.port})${colors.reset}`);
+  for (const item of remainingChecks) {
+    const padName = item.svc.name.padEnd(23);
+    if (item.status === 'offline') {
+      console.log(`  ${colors.gray}[OFFLINE] ${padName} ya estaba detenido (puerto ${item.svc.port})${colors.reset}`);
+    } else if (!item.stillInUse) {
+      console.log(`  ${colors.red}[STOPPED] ${padName} detenido limpiamente (/api/shutdown)${colors.reset}`);
+      stoppedCount++;
+    } else {
+      const pids = pidMap.get(item.svc.port);
+      const killed = killPortPids(pids);
+      if (killed) {
+        console.log(`  ${colors.red}[KILLED]  ${padName} detenido forzosamente (puerto ${item.svc.port})${colors.reset}`);
         stoppedCount++;
       } else {
-        console.log(`  ${colors.yellow}[WARN]    ${padName} no se pudo detener en puerto ${svc.port}${colors.reset}`);
+        console.log(`  ${colors.yellow}[WARN]    ${padName} no se pudo detener en puerto ${item.svc.port}${colors.reset}`);
       }
-    } else {
-      console.log(`  ${colors.gray}[OFFLINE] ${padName} ya estaba detenido (puerto ${svc.port})${colors.reset}`);
     }
   }
 
-  // Limpieza de scripts temporales .bat de Windows
+  // Limpieza de carpeta temp-bin legacy si existiera
   const tempBinDir = path.join(ROOT, '.infra-logs', 'temp-bin');
   if (fs.existsSync(tempBinDir)) {
     try {
       fs.rmSync(tempBinDir, { recursive: true, force: true });
-    } catch (e) {
-      // Ignorar fallos si algún archivo está momentáneamente bloqueado
+    } catch {
+      // Ignorar
     }
   }
 
@@ -357,17 +449,35 @@ async function stopAll(targetSvcName) {
 }
 
 /**
- * Imprime el estado actual de los microservicios.
+ * Imprime el estado detallado actual de los microservicios (puerto, ping HTTP, latencia y .env).
  */
 async function printStatus() {
   console.log(`\n${colors.cyan}--- Estado de la Infraestructura ---${colors.reset}\n`);
-  for (const svc of SERVICES) {
-    const inUse = await isPortInUse(svc.port);
+  const states = await Promise.all(
+    SERVICES.map(async (svc) => {
+      const inUse = await isPortInUse(svc.port);
+      const requiresEnv = SERVICES_REQUIRING_ENV.includes(svc.name);
+      const hasEnv = !requiresEnv || fs.existsSync(path.join(ROOT, svc.dir, '.env'));
+      if (!inUse) return { svc, inUse: false, responding: false, latency: null, requiresEnv, hasEnv };
+      const start = Date.now();
+      const responding = await isServiceResponding(svc.port);
+      const latency = Date.now() - start;
+      return { svc, inUse: true, responding, latency, requiresEnv, hasEnv };
+    })
+  );
+
+  for (const { svc, inUse, responding, latency, requiresEnv, hasEnv } of states) {
     const padName = svc.name.padEnd(23);
-    if (inUse) {
-      console.log(`  ${colors.green}[RUNNING]${colors.reset} ${padName} en puerto ${svc.port}`);
+    const envBadge = requiresEnv
+      ? (hasEnv ? `${colors.green}[.env OK]${colors.reset}` : `${colors.yellow}[SIN .env]${colors.reset}`)
+      : '';
+
+    if (inUse && responding) {
+      console.log(`  ${colors.green}[ONLINE]${colors.reset}  ${padName} puerto ${svc.port} ${colors.gray}(${latency}ms)${colors.reset} ${envBadge}`);
+    } else if (inUse) {
+      console.log(`  ${colors.yellow}[BUSY]${colors.reset}    ${padName} puerto ${svc.port} (sin respuesta /ping) ${envBadge}`);
     } else {
-      console.log(`  ${colors.gray}[STOPPED]${colors.reset} ${padName} (puerto ${svc.port})`);
+      console.log(`  ${colors.gray}[STOPPED]${colors.reset} ${padName} (puerto ${svc.port}) ${envBadge}`);
     }
   }
   console.log('');
@@ -393,16 +503,26 @@ switch (command) {
   case 'start':
     await startAll(serviceArg);
     process.exit(0);
+    break;
   case 'stop':
     await stopAll(serviceArg);
     process.exit(0);
+    break;
+  case 'restart':
+    await stopAll(serviceArg);
+    await sleep(250);
+    await startAll(serviceArg);
+    process.exit(0);
+    break;
   case 'status':
     await printStatus();
     process.exit(0);
+    break;
   case 'health':
     await printHealth();
     process.exit(0);
+    break;
   default:
-    console.log(`\nUso: node infra-runner.js [start | stop | status | health] [service-name]\n`);
+    console.log(`\nUso: node infra-runner.js [start | stop | status | health] [service-name | all]\n`);
     process.exit(1);
 }

@@ -349,6 +349,25 @@ body {
   flex: 1;
 }
 
+.dashboard-grid.console-full-mode {
+  grid-template-columns: 1fr;
+}
+
+.dashboard-grid.console-full-mode .services-section {
+  display: none;
+}
+
+.section-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.btn-sm {
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
 .section-header {
   display: flex;
   justify-content: space-between;
@@ -764,4 +783,27 @@ body {
 }
 .btn-danger:hover {
   background: #dc2626;
+}
+
+
+/* ==========================================================================
+   VISTAS CONSOLA GLOBAL Y ACCIONES MASIVAS
+   ========================================================================== */
+.dashboard-grid.console-only {
+  grid-template-columns: 1fr;
+}
+
+.dashboard-grid.console-only .services-section {
+  display: none;
+}
+
+.section-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.btn-sm {
+  padding: 6px 12px;
+  font-size: 12px;
 }

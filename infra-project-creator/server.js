@@ -43,13 +43,13 @@ app.get('/', (req, res) => {
 
 
 /**
- * Helper para verificar la disponibilidad de comandos en el sistema
+ * Helper para verificar la disponibilidad de comandos en el sistema sin disparar DEP0190
  */
 function checkTool(cmd, args) {
   return new Promise((resolve) => {
-    const process = spawn(cmd, args, { shell: true });
-    process.on('close', (code) => resolve(code === 0));
-    process.on('error', () => resolve(false));
+    const child = spawn(`${cmd} ${args.join(' ')}`, { shell: true, windowsHide: true });
+    child.on('close', (code) => resolve(code === 0));
+    child.on('error', () => resolve(false));
   });
 }
 

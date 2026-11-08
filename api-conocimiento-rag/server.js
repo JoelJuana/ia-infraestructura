@@ -15,13 +15,24 @@ const app = express();
 const PORT = process.env.PORT || process.env.RAG_SERVICE_PORT || 3600;
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '15mb' }));
 
 // Logger simple
 app.use((req, res, next) => {
   console.log(`[REQUEST] ${req.method} ${req.url}`);
   next();
 });
+
+// Helper para limpiar y tokenizar texto
+function tokenize(text) {
+  return String(text || '')
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // Eliminar acentos
+    .replace(/[^a-z0-9\s]/g, " ")   // Reemplazar puntuación por espacio
+    .split(/\s+/)
+    .filter((t) => t.length > 2);   // Omitir stop words muy cortas
+}
 
 // Almacenamiento en memoria de fragmentos (chunks) indexados
 let documentStore = [];
@@ -30,7 +41,14 @@ let documentStore = [];
 try {
   if (fs.existsSync(STORE_PATH)) {
     const rawData = fs.readFileSync(STORE_PATH, 'utf-8');
-    documentStore = JSON.parse(rawData);
+    const parsed = JSON.parse(rawData);
+    if (Array.isArray(parsed)) {
+      documentStore = parsed.map((chunk) => ({
+        ...chunk,
+        tokens: Array.isArray(chunk.tokens) ? chunk.tokens : tokenize(chunk.text),
+        cleanText: chunk.cleanText || (Array.isArray(chunk.tokens) ? chunk.tokens.join(' ') : tokenize(chunk.text).join(' '))
+      }));
+    }
     console.log(`✓ Base de conocimiento RAG cargada desde disco: ${documentStore.length} chunks.`);
   } else {
     console.log('ℹ No se detecto base de conocimiento persistente en disco. Iniciando vacia.');
@@ -55,55 +73,79 @@ function saveStore() {
   }
 }
 
-// Helper para limpiar y tokenizar texto
-function tokenize(text) {
-  return text
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "") // Eliminar acentos
-    .replace(/[^a-z0-9\s]/g, "") // Eliminar puntuacion
-    .split(/\s+/)
-    .filter(t => t.length > 2); // Omitir stop words muy cortas
-}
-
-// Helper para calcular la coincidencia de texto (Score TF-IDF simplificado)
-function scoreChunk(queryTokens, chunkTokens, chunkText) {
+// Helper para calcular la coincidencia de texto (Score TF-IDF + BM25 ligero con precomputo)
+function scoreChunk(queryTokens, cleanQuery, chunk) {
   let score = 0;
-  
-  // 1. Coincidencia de tokens individuales
-  queryTokens.forEach(token => {
-    const count = chunkTokens.filter(t => t === token).length;
-    if (count > 0) {
-      score += count * 1.5; // Frecuencia del token (TF)
-    }
-  });
+  const chunkTokens = chunk.tokens || [];
+  const titleTokens = tokenize(chunk.title || '');
 
-  // 2. Coincidencias de frases exactas (Bonus de relevancia)
-  const cleanQuery = queryTokens.join(' ');
-  const cleanText = tokenize(chunkText).join(' ');
-  if (cleanText.includes(cleanQuery)) {
+  // 1. Coincidencia de tokens individuales en contenido y título
+  for (const token of queryTokens) {
+    let count = 0;
+    for (let i = 0; i < chunkTokens.length; i++) {
+      if (chunkTokens[i] === token) count++;
+    }
+    if (count > 0) {
+      // Saturación logarítmica para evitar sesgo por chunks largos
+      score += (1 + Math.log(count)) * 2.0;
+    }
+    if (titleTokens.includes(token)) {
+      score += 3.0; // Bonus si el término aparece en el título del documento
+    }
+  }
+
+  // 2. Coincidencias de frases exactas usando cleanText precalculado
+  const cleanText = chunk.cleanText || chunkTokens.join(' ');
+  if (cleanQuery.length > 3 && cleanText.includes(cleanQuery)) {
     score += 10;
   }
 
-  return score;
+  return Number(score.toFixed(3));
 }
 
 // --- Endpoints ---
 
 // 1. Root: Informacion de la API
-app.get('/', (req, res) => {
+app.get('/', (_req, res) => {
+  const uniqueDocs = new Set(documentStore.map((c) => c.title)).size;
   res.json({
     ok: true,
     data: {
       name: "Proyectos IA - API de Conocimiento & RAG",
-      version: "1.0.0",
+      version: "1.1.0",
+      totalDocuments: uniqueDocs,
       totalIndexedChunks: documentStore.length
     },
     message: "Servicio de RAG en linea."
   });
 });
 
-// 2. POST: Indexar nuevo texto / archivo
+// 1.5 GET: Listar documentos únicos indexados
+app.get('/documents', (_req, res) => {
+  const docsMap = new Map();
+  for (const chunk of documentStore) {
+    const existing = docsMap.get(chunk.title);
+    if (!existing) {
+      docsMap.set(chunk.title, {
+        title: chunk.title,
+        chunksCount: 1,
+        metadata: chunk.metadata || {},
+        updatedAt: chunk.updatedAt || null
+      });
+    } else {
+      existing.chunksCount += 1;
+    }
+  }
+
+  res.json({
+    ok: true,
+    data: Array.from(docsMap.values()),
+    totalDocuments: docsMap.size,
+    totalChunks: documentStore.length
+  });
+});
+
+// 2. POST: Indexar nuevo texto / archivo (con Upsert automático por title)
 app.post('/index', (req, res) => {
   const { title, content, metadata = {} } = req.body;
 
@@ -116,13 +158,19 @@ app.post('/index', (req, res) => {
   }
 
   try {
-    // Fragmentar el contenido en parrafos (chunks) de tamano moderado
-    const paragraphs = content.split(/\n\s*\n+/);
+    // Upsert: eliminar fragmentos previos del mismo documento para evitar duplicados
+    const previousLength = documentStore.length;
+    documentStore = documentStore.filter((chunk) => chunk.title !== title);
+    const replacedChunks = previousLength - documentStore.length;
+
+    // Fragmentar el contenido en párrafos de tamaño moderado
+    const paragraphs = String(content).split(/\n\s*\n+/);
     const newChunks = [];
+    const nowIso = new Date().toISOString();
 
     paragraphs.forEach((p, idx) => {
       const trimmed = p.trim();
-      if (!trimmed || trimmed.length < 20) return; // Omitir parrafos vacios o muy cortos
+      if (!trimmed || trimmed.length < 20) return;
 
       const tokens = tokenize(trimmed);
       const chunkId = `${Date.now()}-${idx}`;
@@ -132,6 +180,8 @@ app.post('/index', (req, res) => {
         title,
         text: trimmed,
         tokens,
+        cleanText: tokens.join(' '),
+        updatedAt: nowIso,
         metadata: { ...metadata, paragraphIndex: idx }
       });
     });
@@ -144,11 +194,13 @@ app.post('/index', (req, res) => {
       data: {
         documentTitle: title,
         chunksCreated: newChunks.length,
+        replacedChunks,
         totalStoreChunks: documentStore.length
       },
-      message: "Documento fragmentado e indexado con exito."
+      message: replacedChunks > 0
+        ? `Documento actualizado (upsert): ${replacedChunks} chunks reemplazados por ${newChunks.length} nuevos.`
+        : "Documento fragmentado e indexado con exito."
     });
-
   } catch (error) {
     console.error("Error al indexar documento:", error);
     res.status(500).json({
@@ -173,7 +225,7 @@ app.post('/search', (req, res) => {
 
   try {
     const queryTokens = tokenize(query);
-    
+
     if (queryTokens.length === 0) {
       return res.json({
         ok: true,
@@ -182,27 +234,26 @@ app.post('/search', (req, res) => {
       });
     }
 
-    // Calcular la puntuacion de cada fragmento
-    const scored = documentStore.map(chunk => {
-      const score = scoreChunk(queryTokens, chunk.tokens, chunk.text);
+    const cleanQuery = queryTokens.join(' ');
+
+    const scored = documentStore.map((chunk) => {
+      const score = scoreChunk(queryTokens, cleanQuery, chunk);
       return { ...chunk, score };
     });
 
-    // Filtrar fragmentos con score > 0 y ordenar descendentemente
     const results = scored
-      .filter(c => c.score > 0)
+      .filter((c) => c.score > 0)
       .sort((a, b) => b.score - a.score)
-      .slice(0, limit);
+      .slice(0, Number(limit) || 3);
 
-    // Omitir tokens en la respuesta final para ahorrar ancho de banda
-    const cleanResults = results.map(({ tokens, ...rest }) => rest);
+    // Omitir campos internos de indexación en la respuesta final
+    const cleanResults = results.map(({ tokens, cleanText, ...rest }) => rest);
 
     res.json({
       ok: true,
       data: cleanResults,
       message: `Busqueda completada. Se recuperaron ${cleanResults.length} pasajes relevantes.`
     });
-
   } catch (error) {
     console.error("Error al buscar en RAG:", error);
     res.status(500).json({
@@ -213,8 +264,31 @@ app.post('/search', (req, res) => {
   }
 });
 
-// 4. DELETE: Limpiar el store en memoria (para pruebas)
-app.delete('/store', (req, res) => {
+// 3.5 DELETE: Eliminar un documento específico por su título
+app.delete('/documents/:title', (req, res) => {
+  const targetTitle = decodeURIComponent(req.params.title || '');
+  const beforeCount = documentStore.length;
+  documentStore = documentStore.filter((c) => c.title !== targetTitle);
+  const removedChunks = beforeCount - documentStore.length;
+
+  if (removedChunks === 0) {
+    return res.status(404).json({
+      ok: false,
+      error: "DOCUMENT_NOT_FOUND",
+      message: `No se encontró ningún documento con el título "${targetTitle}".`
+    });
+  }
+
+  saveStore();
+  res.json({
+    ok: true,
+    data: { title: targetTitle, removedChunks, totalStoreChunks: documentStore.length },
+    message: `Documento "${targetTitle}" eliminado (${removedChunks} chunks).`
+  });
+});
+
+// 4. DELETE: Limpiar el store completo
+app.delete('/store', (_req, res) => {
   documentStore = [];
   saveStore();
   res.json({
@@ -224,12 +298,12 @@ app.delete('/store', (req, res) => {
 });
 
 // 5. GET: Ping healthcheck
-app.get('/ping', (req, res) => {
-  res.json({ status: 'ok' });
+app.get('/ping', (_req, res) => {
+  res.json({ status: 'ok', service: 'api-conocimiento-rag', port: PORT });
 });
 
 // 6. POST: Shutdown
-app.post('/api/shutdown', (req, res) => {
+app.post('/api/shutdown', (_req, res) => {
   saveStore();
   res.json({ success: true, message: 'Servidor apagándose...' });
   console.log('Recibida petición de apagado. Cerrando servidor de RAG...');

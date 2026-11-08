@@ -2,7 +2,6 @@
    DASHBOARD LOGIC - PROYECTOS IA
    ========================================================================== */
 
-// Nombre descriptivo de servicios
 const SERVICES_METADATA = {
   'infra-github': {
     title: 'Servicio GitHub Integration',
@@ -26,11 +25,11 @@ const SERVICES_METADATA = {
   },
   'api-conocimiento-rag': {
     title: 'Base de Conocimiento RAG',
-    desc: 'Motor de indexación, fragmentación y búsqueda semántica de documentos local.'
+    desc: 'Motor de indexación (upsert), fragmentación y búsqueda semántica local.'
   },
   'api-utilidades-scraping': {
     title: 'Extractor Web (Scraping)',
-    desc: 'Limpieza y extracción no intrusiva de texto web estructurado en Markdown.'
+    desc: 'Limpieza y extracción de texto, tablas y enlaces web en Markdown.'
   },
   'infra-gateway': {
     title: 'API Gateway Central',
@@ -38,9 +37,8 @@ const SERVICES_METADATA = {
   }
 };
 
-// Configuración global de polling
-const POLL_INTERVAL_HEALTH = 5000; // 5 segundos
-const POLL_INTERVAL_LOGS = 3000;   // 3 segundos
+const POLL_INTERVAL_HEALTH = 5000;
+const POLL_INTERVAL_LOGS = 3000;
 
 let currentSelectedService = null;
 let healthIntervalId = null;
@@ -51,12 +49,19 @@ let pendingAction = null;
 let pendingService = null;
 
 // Elementos del DOM
+const dashboardGrid = document.getElementById('dashboard-grid');
 const servicesContainer = document.getElementById('services-container');
 const suiteHealthText = document.getElementById('suite-health-text');
 const suiteHealthPulse = document.getElementById('suite-health-pulse');
 const suiteHealthBox = document.getElementById('suite-health-box');
 const orchestratorVal = document.getElementById('orchestrator-val');
+const idleVal = document.getElementById('idle-val');
+
 const btnRefreshAll = document.getElementById('btn-refresh-all');
+const btnStartAll = document.getElementById('btn-start-all');
+const btnStopAll = document.getElementById('btn-stop-all');
+const btnNavDashboard = document.getElementById('btn-nav-dashboard');
+const btnNavLogs = document.getElementById('btn-nav-logs');
 
 const activeLogTitle = document.getElementById('active-log-title');
 const btnRefreshLogs = document.getElementById('btn-refresh-logs');
@@ -64,6 +69,7 @@ const btnClearLogs = document.getElementById('btn-clear-logs');
 const terminalContent = document.getElementById('terminal-content');
 
 const confirmModal = document.getElementById('confirm-modal');
+const modalTitle = document.getElementById('modal-title');
 const btnCloseModal = document.getElementById('btn-close-modal');
 const btnCancelModal = document.getElementById('btn-cancel-modal');
 const btnConfirmModal = document.getElementById('btn-confirm-modal');
@@ -74,17 +80,39 @@ const modalBodyText = document.getElementById('modal-body-text');
    ========================================================================== */
 document.addEventListener('DOMContentLoaded', () => {
   fetchHealth();
-  
-  // Iniciar Polling de salud
   healthIntervalId = setInterval(fetchHealth, POLL_INTERVAL_HEALTH);
-  
-  // Event listeners
+
   btnRefreshAll.addEventListener('click', () => {
     btnRefreshAll.classList.add('fa-spin');
     fetchHealth().finally(() => {
       setTimeout(() => btnRefreshAll.classList.remove('fa-spin'), 600);
     });
   });
+
+  if (btnStartAll) {
+    btnStartAll.addEventListener('click', () => startService('all'));
+  }
+
+  if (btnStopAll) {
+    btnStopAll.addEventListener('click', () => promptStopService('all'));
+  }
+
+  if (btnNavDashboard && btnNavLogs) {
+    btnNavDashboard.addEventListener('click', (e) => {
+      e.preventDefault();
+      btnNavDashboard.classList.add('active');
+      btnNavLogs.classList.remove('active');
+      dashboardGrid.classList.remove('console-only');
+    });
+
+    btnNavLogs.addEventListener('click', (e) => {
+      e.preventDefault();
+      btnNavLogs.classList.add('active');
+      btnNavDashboard.classList.remove('active');
+      dashboardGrid.classList.add('console-only');
+      selectServiceLogs('all');
+    });
+  }
 
   btnRefreshLogs.addEventListener('click', () => {
     if (currentSelectedService) {
@@ -96,12 +124,10 @@ document.addEventListener('DOMContentLoaded', () => {
     terminalContent.innerText = '';
   });
 
-  // Modal close handlers
   btnCloseModal.addEventListener('click', hideModal);
   btnCancelModal.addEventListener('click', hideModal);
   btnConfirmModal.addEventListener('click', executePendingAction);
 
-  // Cerrar modal al hacer clic fuera
   window.addEventListener('click', (e) => {
     if (e.target === confirmModal) hideModal();
   });
@@ -114,7 +140,7 @@ async function fetchHealth() {
   try {
     const res = await fetch('/api/health');
     if (!res.ok) throw new Error('Error al conectar con el Gateway.');
-    
+
     const result = await res.json();
     if (result.ok && result.data) {
       updateUI(result.data);
@@ -134,10 +160,13 @@ async function fetchHealth() {
 }
 
 function updateUI(data) {
-  // 1. Actualizar estado global
   const status = data.overallStatus;
   orchestratorVal.innerText = data.orchestrator.toUpperCase();
-  
+
+  if (idleVal && data.idleMinutes !== undefined) {
+    idleVal.innerText = `${data.idleMinutes}m / ${data.idleTimeoutMinutes || 30}m`;
+  }
+
   if (status === 'healthy') {
     suiteHealthText.innerText = 'SALUDABLE';
     suiteHealthPulse.className = 'pulse-dot green';
@@ -147,38 +176,33 @@ function updateUI(data) {
     suiteHealthPulse.className = 'pulse-dot orange';
     suiteHealthBox.style.borderColor = 'rgba(245, 158, 11, 0.3)';
   } else {
-    suiteHealthText.innerText = 'FALLO GENERAL';
+    suiteHealthText.innerText = 'OFFLINE / PARCIAL';
     suiteHealthPulse.className = 'pulse-dot red';
     suiteHealthBox.style.borderColor = 'rgba(239, 68, 68, 0.3)';
   }
 
-  // 2. Generar grilla de servicios
   const services = Object.values(data.services);
-  
-  // Agregar Gateway a la lista de forma visual para monitoreo (aunque siempre está online para ver esta pantalla)
   const gwService = {
     name: 'infra-gateway',
-    url: `http://localhost:3000`,
+    url: 'http://localhost:3000',
     status: 'online',
     latencyMs: 1,
     envExists: true,
     isGateway: true
   };
-  
+
   const allServices = [...services, gwService];
-  
   servicesContainer.innerHTML = '';
-  
-  allServices.forEach(svc => {
+
+  allServices.forEach((svc) => {
     const meta = SERVICES_METADATA[svc.name] || { title: svc.name, desc: 'Servicio de la suite.' };
     const isOnline = svc.status === 'online';
     const isDegraded = svc.status === 'degraded';
-    
+
     let statusClass = 'offline';
     if (isOnline) statusClass = 'online';
     if (isDegraded) statusClass = 'degraded';
-    
-    // Badge de latencia
+
     let latencyHTML = '';
     if (isOnline && svc.latencyMs !== null) {
       const isSlow = svc.latencyMs > 150;
@@ -189,7 +213,6 @@ function updateUI(data) {
       `;
     }
 
-    // Badge de variable de entorno (.env)
     let envHTML = '';
     const servicesWithOptionalEnv = [
       'infra-gateway',
@@ -206,7 +229,6 @@ function updateUI(data) {
       }
     }
 
-    // Botones de acción
     let actionButtons = '';
     if (svc.isGateway) {
       actionButtons = `
@@ -215,7 +237,7 @@ function updateUI(data) {
         </button>
       `;
     } else {
-      const isPending = pendingService === svc.name;
+      const isPending = pendingService === svc.name || pendingService === 'all';
       const startBtn = `
         <button class="btn btn-start" ${isPending ? 'disabled' : ''} onclick="startService('${svc.name}')">
           ${isPending && pendingAction === 'start' ? '<i class="fa-solid fa-circle-notch spinner"></i>' : '<i class="fa-solid fa-play"></i>'} Arrancar
@@ -226,7 +248,7 @@ function updateUI(data) {
           ${isPending && pendingAction === 'stop' ? '<i class="fa-solid fa-circle-notch spinner"></i>' : '<i class="fa-solid fa-stop"></i>'} Detener
         </button>
       `;
-      
+
       actionButtons = `
         ${isOnline || isDegraded ? stopBtn : startBtn}
         <button class="btn btn-secondary btn-logs ${currentSelectedService === svc.name ? 'active' : ''}" onclick="selectServiceLogs('${svc.name}')">
@@ -263,14 +285,13 @@ function updateUI(data) {
 async function startService(serviceName) {
   pendingAction = 'start';
   pendingService = serviceName;
-  fetchHealth(); // Actualizar UI para mostrar spinner
-  
+  fetchHealth();
+
   try {
     const res = await fetch(`/api/gateway/services/${serviceName}/start`, { method: 'POST' });
     const result = await res.json();
     if (!res.ok) throw new Error(result.message || 'Error al iniciar servicio.');
-    
-    // Autocargar logs tras arrancar
+
     selectServiceLogs(serviceName);
   } catch (err) {
     alert(`No se pudo arrancar el servicio: ${err.message}`);
@@ -284,17 +305,23 @@ async function startService(serviceName) {
 function promptStopService(serviceName) {
   pendingAction = 'stop';
   pendingService = serviceName;
-  modalBodyText.innerHTML = `¿Estás seguro de que deseas detener el servicio <strong>${SERVICES_METADATA[serviceName].title}</strong>? Esto cortará el acceso del monorepositorio a esta API local.`;
+  if (serviceName === 'all') {
+    modalTitle.innerText = 'Detener Todos los Microservicios';
+    modalBodyText.innerHTML = '¿Estás seguro de que deseas detener <strong>todos los microservicios de negocio</strong> (puertos 3100–3700)? El API Gateway (3000) permanecerá en línea.';
+  } else {
+    modalTitle.innerText = 'Apagar Servicio';
+    modalBodyText.innerHTML = `¿Estás seguro de que deseas detener el servicio <strong>${SERVICES_METADATA[serviceName].title}</strong>? Esto cortará el acceso del monorepositorio a esta API local.`;
+  }
   showModal();
 }
 
 async function executePendingAction() {
   hideModal();
   if (pendingAction !== 'stop' || !pendingService) return;
-  
+
   const serviceName = pendingService;
-  fetchHealth(); // Mostrar spinner
-  
+  fetchHealth();
+
   try {
     const res = await fetch(`/api/gateway/services/${serviceName}/stop`, { method: 'POST' });
     const result = await res.json();
@@ -313,19 +340,13 @@ async function executePendingAction() {
    ========================================================================== */
 function selectServiceLogs(serviceName) {
   currentSelectedService = serviceName;
-  activeLogTitle.innerText = serviceName;
-  terminalContent.innerText = `Cargando logs de ${serviceName}...`;
-  
-  // Limpiar polling previo
+  activeLogTitle.innerText = serviceName === 'all' ? 'CONSOLA GLOBAL' : serviceName;
+  terminalContent.innerText = `Cargando logs de ${serviceName === 'all' ? 'todos los servicios' : serviceName}...`;
+
   if (logsIntervalId) clearInterval(logsIntervalId);
-  
-  // Carga inmediata
+
   fetchLogs(serviceName);
-  
-  // Configurar polling de logs
   logsIntervalId = setInterval(() => fetchLogs(serviceName), POLL_INTERVAL_LOGS);
-  
-  // Refrescar estado para activar el botón en la tarjeta
   fetchHealth();
 }
 
@@ -333,15 +354,11 @@ async function fetchLogs(serviceName) {
   try {
     const res = await fetch(`/api/gateway/logs/${serviceName}`);
     if (!res.ok) throw new Error('Error al obtener logs.');
-    
+
     const result = await res.json();
     if (result.ok) {
       const isAtBottom = terminalContent.scrollHeight - terminalContent.clientHeight <= terminalContent.scrollTop + 50;
-      
-      // Sanitizar salida simple
       terminalContent.innerText = result.logs;
-      
-      // Auto-scroll si el usuario estaba al final
       if (isAtBottom) {
         terminalContent.scrollTop = terminalContent.scrollHeight;
       }
@@ -360,9 +377,4 @@ function showModal() {
 
 function hideModal() {
   confirmModal.classList.remove('active');
-  if (pendingAction === 'stop' && pendingService) {
-    pendingAction = null;
-    pendingService = null;
-    fetchHealth();
-  }
 }

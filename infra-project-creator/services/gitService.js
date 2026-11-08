@@ -122,8 +122,11 @@ async function syncProjectWithGit(projectName, activeJobs, jobId) {
 
   log(`Sincronizando nuevo proyecto '${projectName}' con Git/GitHub...`);
 
-  // 1. git add
-  await runGitCommand('git', ['add', projectName], BASE_PROYECTOS_DIR, log);
+  // 1. git add (soportando tanto apps/<projectName> como raíz)
+  const appRelPath = fs.existsSync(path.join(BASE_PROYECTOS_DIR, 'apps', projectName))
+    ? `apps/${projectName}`
+    : projectName;
+  await runGitCommand('git', ['add', appRelPath], BASE_PROYECTOS_DIR, log);
   
   if (fs.existsSync(path.join(BASE_PROYECTOS_DIR, 'package-lock.json'))) {
     await runGitCommand('git', ['add', 'package-lock.json'], BASE_PROYECTOS_DIR, log);
