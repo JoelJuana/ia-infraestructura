@@ -4,10 +4,17 @@ dist/
 build/
 *.log
 
-# Entornos locales (contienen tokens y credenciales)
+# Entornos locales y credenciales (contienen tokens y claves privadas)
 .env
 .env.local
 .env.*.local
+*serviceAccountKey*.json
+firebase_deploy_temp*.json
+.firebase/
+
+# Datos persistentes locales y caché temporal
+api-conocimiento-rag/data/store.json
+scratch/
 
 # Logs de infraestructura
 .infra-logs/

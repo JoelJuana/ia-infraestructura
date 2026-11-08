@@ -1,148 +1,39 @@
-# Project Creator — API Local de Scaffolding y Automatización
+# infra-project-creator
 
-Este servicio proporciona una **API local robusta y panel interactivo** para automatizar el scaffolding, la inicialización y el registro de nuevos proyectos estructurados dentro del monorepositorio **Proyectos IA**. Está optimizado para ser consumido tanto por desarrolladores como por agentes autónomos de nuestra suite.
+Backend de la herramienta visual para la creación, renombrado y borrado estructurado de nuevos proyectos en el monorepositorio local `IA_Proyectos`.
 
-## Características Principales
-- **Arquitectura Limpia con Express**: API modular estructurada en servicios (`scaffolderService`, `gitService`, `dnsService`).
-- **Motor de Plantillas Dinámico**: Copia recursivamente estructuras base desde el directorio global `_plantillas/` de la raíz y reemplaza dinámicamente placeholders en los archivos (`{{PROJECT_NAME}}`, `{{nameClean}}`, `{{PROJECT_DESCRIPTION}}`, `{{AUTHOR}}`, etc.).
-- **Catálogo Automatizado**: Registra automáticamente cada nuevo proyecto en el catálogo central `projects.json`.
-- **Integración DNS (Cloudflare)**: Se comunica con la API local de `gestion-dominios` para configurar y actualizar registros CNAME de forma dinámica en Cloudflare.
-- **Automatización Git/GitHub**: Inicializa repositorios, crea Issues de bienvenida con tareas iniciales en GitHub, realiza commits convencionales y empuja los cambios al repositorio remoto (`proyectos_ia` de GitHub).
-- **Seguridad Integrada**: Prevención de ataques de *Path Traversal* validando nombres de proyectos mediante expresiones regulares seguras.
+## 📋 Especificaciones Técnicas
 
----
+- **Puerto de red**: `3300` (Gateway: `/api/proj`)
+- **Ruta física**: `IA_Infraestructura/infra-project-creator/`
+- **Requiere variables de entorno (.env)**: Sí
+  - `BASE_PROYECTOS_DIR`: Ruta absoluta local al directorio del monorepositorio (ej. `C:\Users\jjtei\Desktop\IA_Proyectos\`).
 
-## Cómo Levantar el Servicio
+## ⚙️ Funciones Clave
 
-1. Asegúrate de tener configuradas tus variables de entorno en el archivo `.env` del directorio:
-   ```env
-   PORT=4100
-   BASE_PROYECTOS_DIR=C:\Users\jjtei\Desktop\Proyectos_IA
-   ```
-2. Instala las dependencias necesarias:
-   ```bash
-   npm install
-   ```
-3. Levanta el servidor en modo producción:
-   ```bash
-   npm start
-   ```
-   O levántalo en modo desarrollo con recarga automática:
-   ```bash
-   npm run dev
-   ```
+1. **Scaffolding Multi-Tecnología**: Genera plantillas base limpias para diferentes tipos de proyectos:
+   - `vanilla`: HTML, CSS y JS básico.
+   - `react`: React clásico con Vite.
+   - `node` / `api`: Aplicación Node.js básica con Express y CORS configurados.
+   - `python`: Crea un entorno virtual (`venv`) con scripts básicos.
+2. **Ciclo de Vida Integrado**:
+   - Inicializa el repositorio Git (si aplica), crea un commit inicial y empuja.
+   - Registra de forma automática la nueva aplicación en `projects.json`.
+   - Crea automáticamente subdominios CNAME en Cloudflare mediante `dnsService`.
+   - Crea un Issue de inicio en GitHub.
+3. **Ejecución Asíncrona (Jobs)**:
+   - Las operaciones pesadas (como instalaciones de npm y compilación inicial) se ejecutan asíncronamente en segundo plano.
+   - Retorna un `jobId` que permite monitorizar el estado del scaffolding.
 
-El servidor estará activo y escuchando en `http://localhost:4100`.
+## 📡 Endpoints del Servicio
 
----
-
-## Documentación de la API para Agentes Autónomos
-
-### 1. Health Check
-* **Endpoint**: `GET /ping`
-* **Descripción**: Verifica que la API local esté levantada y responda correctamente.
-* **Respuesta (200 OK)**:
-  ```json
-  {
-    "status": "ok"
-  }
-  ```
-
-### 2. Diagnóstico del Entorno
-* **Endpoint**: `GET /api/diagnose`
-* **Descripción**: Valida si las herramientas clave del sistema (`Node.js`, `Git` y `Python`) están instaladas y disponibles en el PATH.
-* **Respuesta (200 OK)**:
-  ```json
-  {
-    "node": true,
-    "git": true,
-    "python": true
-  }
-  ```
-
-### 3. Crear Proyecto (Scaffolding)
-* **Endpoint**: `POST /api/projects/create`
-* **Descripción**: Inicializa la estructura del proyecto en la raíz del monorepositorio copiando la plantilla correspondiente de `_plantillas/`, reemplaza placeholders, registra el proyecto en `projects.json`, crea el CNAME en Cloudflare, crea un Issue de GitHub y sincroniza mediante Git commit y push.
-* **Payload JSON requerido**:
-  ```json
-  {
-    "name": "nombre-del-proyecto",
-    "type": "vanilla | node | react | api | python",
-    "description": "Una breve descripción del propósito del proyecto",
-    "author": "JoelJuana",
-    "extras": ["gitignore", "changelog", "license", "chartjs"],
-    "customDependencies": ["axios", "lodash"]
-  }
-  ```
-  *(Nota: `extras` y `customDependencies` son opcionales. Por defecto se inicializan con gitignore y changelog).*
-* **Respuesta (200 OK)**:
-  ```json
-  {
-    "jobId": "1719748956321",
-    "message": "Proceso de creación de proyecto iniciado."
-  }
-  ```
-  *(El proceso corre de forma asíncrona en segundo plano para evitar bloquear la llamada HTTP. Puedes consultar el progreso usando el endpoint `/api/status?jobId=<jobId>`).*
-
-### 4. Consultar Estado de Creación (Logs)
-* **Endpoint**: `GET /api/status`
-* **Descripción**: Recupera el estado y el historial detallado de logs de ejecución de la terminal local para un `jobId` de creación.
-* **Parámetros URL**: `jobId` (requerido).
-* **Respuesta (200 OK)**:
-  ```json
-  {
-    "status": "completed | running | failed",
-    "logs": [
-      "[14:06:50] Iniciando creación del proyecto: \"mi-app\" (node)",
-      "[14:06:51] Copiando plantilla desde _plantillas/node ...",
-      "[14:06:51] Estructura base copiada con éxito.",
-      "[14:06:52] Instalando dependencias npm en el nuevo proyecto...",
-      "[14:06:55] ✓ Comando completado con éxito.",
-      "[14:06:56] ✓ Proyecto registrado en projects.json central.",
-      "[14:06:56] ✓ Proceso de creación y automatización de \"mi-app\" finalizado con éxito."
-    ]
-  }
-  ```
-
-### 5. Renombrar Proyecto
-* **Endpoint**: `POST /api/projects/rename`
-* **Descripción**: Renombra físicamente un proyecto, actualiza su `package.json`, modifica su entrada en el catálogo central `projects.json`, actualiza los registros DNS en Cloudflare y realiza un commit/push en el monorepositorio.
-* **Payload JSON requerido**:
-  ```json
-  {
-    "oldName": "nombre-antiguo",
-    "newName": "nombre-nuevo"
-  }
-  ```
-* **Respuesta (200 OK)**:
-  ```json
-  {
-    "success": true,
-    "message": "Proyecto renombrado con éxito a 'nombre-nuevo'.",
-    "details": {
-      "dirRenamed": true,
-      "dnsDeleted": "Subdominio antiguo 'nombre-antiguo' eliminado.",
-      "dnsCreated": "Subdominio nuevo 'nombre-nuevo' creado con éxito.",
-      "gitStatus": "Confirmado y subido a GitHub con éxito."
-    }
-  }
-  ```
-
----
-
-## Estructura del Proyecto
-
-El servicio de automatización está organizado de forma modular para facilitar su mantenimiento:
-```text
-crear-proyecto/
-├── config/
-│   └── env.js             # Centraliza la carga y validación de variables de entorno (.env)
-├── services/
-│   ├── scaffolderService.js # Lógica de copia de archivos, templates y reemplazo de placeholders
-│   ├── gitService.js       # Comandos git locales e interacción con la API de GitHub
-│   └── dnsService.js       # Integración CNAME con Cloudflare mediante gestion-dominios
-├── public/                # Panel web interactivo (Frontend HTML/CSS/JS)
-├── server.js              # Servidor Express principal y definición de rutas
-├── package.json
-└── README.md
-```
+| Método | Ruta | Descripción |
+|---|---|---|
+| `GET` | `/api/diagnose` | Diagnóstico de herramientas del sistema (node, git, npm, python) |
+| `GET` | `/api/projects` | Lista todos los proyectos registrados en `projects.json` |
+| `POST` | `/api/projects/create` | Crea un nuevo proyecto (asíncrono, retorna `jobId`) |
+| `GET` | `/api/status` | Obtiene el estado y logs de un job mediante `?jobId=...` |
+| `DELETE` | `/api/projects/:name` | Elimina un proyecto (archivos, registro json, Git e IP DNS) |
+| `POST` | `/api/projects/rename` | Renombra una carpeta y actualiza todas las referencias del proyecto |
+| `POST` | `/api/shutdown` | Apaga de forma limpia el servidor del Project Creator |
+| `GET` | `/ping` | Healthcheck del servicio |

@@ -12,7 +12,7 @@ const __dirname = path.dirname(__filename);
 const STORE_PATH = path.resolve(__dirname, 'data', 'store.json');
 
 const app = express();
-const PORT = process.env.PORT || 4400;
+const PORT = process.env.PORT || process.env.RAG_SERVICE_PORT || 3600;
 
 app.use(cors());
 app.use(express.json());

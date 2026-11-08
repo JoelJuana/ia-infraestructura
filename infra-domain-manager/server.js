@@ -25,10 +25,30 @@ if (fs.existsSync(localEnvPath)) {
 }
 
 const app = express();
-const PORT = process.env.PORT || process.env.CLOUDFLARE_PORT || 3400;
+const PORT = process.env.PORT || process.env.DOMAIN_MANAGER_PORT || process.env.CLOUDFLARE_PORT || 3400;
 
 app.use(cors());
 app.use(express.json());
+app.use((req, res, next) => {
+  // Normalizar rutas cuando entran por el API Gateway (/api/dns/cname -> /api/dns/cname o /api/config)
+  if (req.url !== '/' && !req.url.startsWith('/ping') && !req.url.startsWith('/api/')) {
+    if (req.url.startsWith('/records') || req.url.startsWith('/cname')) {
+      req.url = `/api/dns${req.url}`;
+    } else {
+      req.url = `/api${req.url.startsWith('/') ? '' : '/'}${req.url}`;
+    }
+  }
+  next();
+});
+
+app.get('/', (req, res) => {
+  res.json({
+    ok: true,
+    service: 'infra-domain-manager',
+    port: PORT,
+    status: 'online'
+  });
+});
 
 
 // Helper para guardar variables en el archivo .env

@@ -12,11 +12,19 @@ const execPromise = util.promisify(exec);
 // Cargar variables de entorno
 dotenv.config();
 
+const os = require('os');
 const app = express();
-const PORT = process.env.PORT || 4001;
+const PORT = process.env.PORT || process.env.FIREBASE_SERVICE_PORT || 3200;
 
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
+app.use((req, res, next) => {
+  // Normalizar rutas cuando entran por el API Gateway (/api/fb/hosting/deploy -> /api/hosting/deploy)
+  if (req.url !== '/' && !req.url.startsWith('/ping') && !req.url.startsWith('/api/')) {
+    req.url = `/api${req.url.startsWith('/') ? '' : '/'}${req.url}`;
+  }
+  next();
+});
 
 let firebaseAdminApp = null;
 let isFirebaseInitialized = false;
@@ -169,6 +177,16 @@ function writeEnvFile(vars) {
 }
 
 // --- Endpoints de Configuración ---
+
+app.get('/', (req, res) => {
+  res.json({
+    ok: true,
+    service: 'infra-firebase',
+    port: PORT,
+    initialized: isFirebaseInitialized,
+    status: 'online'
+  });
+});
 
 // Health Check
 app.get('/ping', (req, res) => {
@@ -537,7 +555,7 @@ app.post('/api/hosting/deploy', async (req, res) => {
     fs.writeFileSync(tempConfigPath, JSON.stringify(deployConfig, null, 2), 'utf8');
 
     // 2. Construir comando de deploy usando npx y no interactivo
-    let cmd = `npx firebase deploy --only hosting --config "${tempConfigPath}" --project "${activeProjectId}" --non-interactive`;
+    let cmd = `npx firebase-tools deploy --only hosting --config "${tempConfigPath}" --project "${activeProjectId}" --non-interactive`;
 
     // Si existe token explícito, lo pasamos
     if (process.env.FIREBASE_TOKEN) {
@@ -589,6 +607,359 @@ app.post('/api/hosting/deploy', async (req, res) => {
       message: err.message,
       output: err.stdout || null,
       errors: err.stderr || null
+    });
+  }
+});
+
+// Helper para obtener el access token de Firebase (soporta Service Account y fallback a refresh token de firebase-tools.json)
+async function getFirebaseAccessToken() {
+  // Intento 1: Service Account original
+  try {
+    const credential = admin.app().options.credential;
+    if (credential && typeof credential.getAccessToken === 'function') {
+      const tokenObj = await credential.getAccessToken();
+      if (tokenObj && tokenObj.accessToken) {
+        return tokenObj.accessToken;
+      }
+    }
+  } catch (err) {
+    console.warn('Advertencia al obtener token del Service Account (intentando fallback):', err.message);
+  }
+
+  // Intento 2: Fallback mediante refresh token (FIREBASE_TOKEN o firebase-tools.json)
+  let refreshToken = process.env.FIREBASE_TOKEN;
+  if (!refreshToken) {
+    const configPath = path.join(process.env.USERPROFILE || os.homedir(), '.config', 'configstore', 'firebase-tools.json');
+    if (fs.existsSync(configPath)) {
+      try {
+        const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+        refreshToken = config.tokens?.refresh_token;
+      } catch (err) {
+        console.warn('Error al leer firebase-tools.json:', err.message);
+      }
+    }
+  }
+
+  if (!refreshToken) {
+    throw new Error('Falta credencial de autenticación. Configura Service Account o ejecuta "firebase login" localmente.');
+  }
+
+  // Intercambiar refresh_token por access_token
+  const params = new URLSearchParams({
+    grant_type: 'refresh_token',
+    client_id: '563584335869-fgrhgmd47bqnekij5i8b5pr03ho849e6.apps.googleusercontent.com',
+    client_secret: 'j9iVZfS8kkCEFUPaAeJV0sAi',
+    refresh_token: refreshToken
+  });
+
+  const response = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: params
+  });
+
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(`Error en intercambio de OAuth2 token: ${data.error_description || data.error || 'Error desconocido'}`);
+  }
+
+  return data.access_token;
+}
+
+// Helper para realizar peticiones autenticadas a la API REST de Firebase Hosting
+async function callFirebaseHostingAPI(endpoint, method, body = null) {
+  const accessToken = await getFirebaseAccessToken();
+
+  const url = `https://firebasehosting.googleapis.com/v1beta1/${endpoint}`;
+  const response = await fetch(url, {
+    method,
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Content-Type': 'application/json'
+    },
+    body: body ? JSON.stringify(body) : undefined
+  });
+
+  const data = await response.json();
+  if (!response.ok) {
+    const errorMsg = data.error?.message || `Error con estado HTTP ${response.status}`;
+    throw new Error(errorMsg);
+  }
+  return data;
+}
+
+// Crear sitio de hosting multisitio
+app.post('/api/hosting/sites/create', async (req, res) => {
+  const { siteId, projectId } = req.body;
+
+  if (!siteId) {
+    return res.status(400).json({ error: 'El campo "siteId" es requerido.' });
+  }
+
+  let activeProjectId = projectId || process.env.FIREBASE_PROJECT_ID;
+  if (!activeProjectId && isFirebaseInitialized) {
+    activeProjectId = admin.app().options.projectId;
+  }
+
+  if (!activeProjectId) {
+    return res.status(400).json({
+      error: 'ID del proyecto Firebase no definido. Especifícalo en la petición o configura el proyecto por defecto.'
+    });
+  }
+
+  try {
+    const result = await callFirebaseHostingAPI(
+      `projects/${activeProjectId}/sites?siteId=${siteId}`,
+      'POST',
+      {
+        name: `projects/${activeProjectId}/sites/${siteId}`
+      }
+    );
+
+    res.json({
+      success: true,
+      message: `Sitio "${siteId}" creado con éxito en el proyecto "${activeProjectId}".`,
+      site: result
+    });
+  } catch (err) {
+    console.error('Error al crear sitio de hosting:', err.message);
+    res.status(500).json({
+      error: 'Fallo al crear sitio de Firebase Hosting',
+      message: err.message
+    });
+  }
+});
+
+// Vincular dominio personalizado en Firebase Hosting
+app.post('/api/hosting/customDomains', async (req, res) => {
+  const { siteId, customDomain, projectId } = req.body;
+
+  if (!siteId || !customDomain) {
+    return res.status(400).json({ error: 'Los campos "siteId" y "customDomain" son requeridos.' });
+  }
+
+  let activeProjectId = projectId || process.env.FIREBASE_PROJECT_ID;
+  if (!activeProjectId && isFirebaseInitialized) {
+    activeProjectId = admin.app().options.projectId;
+  }
+
+  if (!activeProjectId) {
+    return res.status(400).json({
+      error: 'ID del proyecto Firebase no definido. Especifícalo en la petición o configura el proyecto por defecto.'
+    });
+  }
+
+  try {
+    const result = await callFirebaseHostingAPI(
+      `projects/${activeProjectId}/sites/${siteId}/customDomains?customDomainId=${customDomain}`,
+      'POST',
+      {
+        name: `projects/${activeProjectId}/sites/${siteId}/customDomains/${customDomain}`
+      }
+    );
+
+    res.json({
+      success: true,
+      message: `Dominio personalizado "${customDomain}" vinculado con éxito al sitio "${siteId}".`,
+      customDomain: result
+    });
+  } catch (err) {
+    console.error('Error al vincular dominio personalizado:', err.message);
+    res.status(500).json({
+      error: 'Fallo al vincular dominio personalizado',
+      message: err.message
+    });
+  }
+});
+
+// Desvincular dominio personalizado de un sitio en Firebase Hosting
+app.delete('/api/hosting/customDomains', async (req, res) => {
+  const { siteId, customDomain, projectId } = req.body;
+
+  if (!siteId || !customDomain) {
+    return res.status(400).json({ error: 'Los campos "siteId" y "customDomain" son requeridos.' });
+  }
+
+  let activeProjectId = projectId || process.env.FIREBASE_PROJECT_ID;
+  if (!activeProjectId && isFirebaseInitialized) {
+    activeProjectId = admin.app().options.projectId;
+  }
+
+  try {
+    const result = await callFirebaseHostingAPI(
+      `projects/${activeProjectId}/sites/${siteId}/customDomains/${customDomain}`,
+      'DELETE'
+    );
+
+    res.json({
+      success: true,
+      message: `Dominio personalizado "${customDomain}" desvinculado con éxito del sitio "${siteId}".`,
+      result
+    });
+  } catch (err) {
+    console.error('Error al desvincular dominio personalizado:', err.message);
+    res.status(500).json({
+      error: 'Fallo al desvincular dominio personalizado',
+      message: err.message
+    });
+  }
+});
+
+// Desplegar carpeta a un site multisitio, vincular dominio personalizado y registrar CNAME
+app.post('/api/hosting/full-deploy', async (req, res) => {
+  const { folderPath, siteId, projectId, customDomain, customSubdomain } = req.body;
+
+  if (!folderPath || !siteId) {
+    return res.status(400).json({ error: 'Los campos "folderPath" y "siteId" son requeridos.' });
+  }
+
+  const resolvedPath = path.resolve(folderPath);
+  if (!fs.existsSync(resolvedPath)) {
+    return res.status(400).json({ error: `La carpeta local especificada no existe: ${resolvedPath}` });
+  }
+
+  let activeProjectId = projectId || process.env.FIREBASE_PROJECT_ID;
+  if (!activeProjectId && isFirebaseInitialized) {
+    activeProjectId = admin.app().options.projectId;
+  }
+
+  if (!activeProjectId) {
+    return res.status(400).json({
+      error: 'ID del proyecto Firebase no definido.'
+    });
+  }
+
+  const stepsExecuted = [];
+
+  try {
+    // Paso 1: Intentar crear el sitio de Firebase Hosting (silencioso si ya existe)
+    try {
+      console.log(`[Full-Deploy] Creando sitio de Hosting "${siteId}" en "${activeProjectId}"...`);
+      await callFirebaseHostingAPI(
+        `projects/${activeProjectId}/sites?siteId=${siteId}`,
+        'POST',
+        { name: `projects/${activeProjectId}/sites/${siteId}` }
+      );
+      stepsExecuted.push({ step: 'create_site', success: true, message: 'Sitio de Hosting creado con éxito.' });
+    } catch (err) {
+      if (err.message.includes('ALREADY_EXISTS') || err.message.toLowerCase().includes('already exists') || err.message.includes('409')) {
+        stepsExecuted.push({ step: 'create_site', success: true, message: 'El sitio de Hosting ya existía.' });
+      } else {
+        throw new Error(`Error al crear sitio de Hosting: ${err.message}`);
+      }
+    }
+
+    // Paso 2: Desplegar archivos al site específico
+    const tempConfigPath = path.join(__dirname, `firebase_deploy_temp_${siteId}.json`);
+    let stdout, stderr;
+    try {
+      const deployConfig = {
+        hosting: {
+          site: siteId,
+          public: resolvedPath,
+          ignore: ['firebase.json', '**/.*', '**/node_modules/**'],
+          rewrites: [{ source: '**', destination: '/index.html' }],
+          headers: [
+            {
+              source: '**',
+              headers: [
+                {
+                  key: 'Cache-Control',
+                  value: 'no-cache, no-store, must-revalidate, max-age=0, s-maxage=0'
+                }
+              ]
+            }
+          ]
+        }
+      };
+      fs.writeFileSync(tempConfigPath, JSON.stringify(deployConfig, null, 2), 'utf8');
+
+      let cmd = `npx firebase-tools deploy --only hosting --config "${tempConfigPath}" --project "${activeProjectId}" --non-interactive`;
+      if (process.env.FIREBASE_TOKEN) {
+        cmd += ` --token "${process.env.FIREBASE_TOKEN}"`;
+      }
+
+      console.log(`[Full-Deploy] Desplegando en sitio "${siteId}"...`);
+      const execResult = await execPromise(cmd, { cwd: __dirname, env: { ...process.env } });
+      stdout = execResult.stdout;
+      stderr = execResult.stderr;
+      stepsExecuted.push({ step: 'deploy_files', success: true, message: 'Archivos desplegados con éxito.' });
+    } catch (err) {
+      throw new Error(`Error en el despliegue de archivos: ${err.message}`);
+    } finally {
+      if (fs.existsSync(tempConfigPath)) {
+        try { fs.unlinkSync(tempConfigPath); } catch (_) {}
+      }
+    }
+
+    // Paso 3: Vincular dominio personalizado en Firebase Hosting si se solicita
+    let finalDomain = customDomain;
+    if (customSubdomain && !finalDomain) {
+      const baseDomain = process.env.CLOUDFLARE_BASE_DOMAIN || 'gironacc.com';
+      finalDomain = `${customSubdomain}.${baseDomain}`;
+    }
+
+    if (finalDomain) {
+      try {
+        console.log(`[Full-Deploy] Vinculando dominio personalizado "${finalDomain}" al sitio "${siteId}"...`);
+        await callFirebaseHostingAPI(
+          `projects/${activeProjectId}/sites/${siteId}/customDomains?customDomainId=${finalDomain}`,
+          'POST',
+          { name: `projects/${activeProjectId}/sites/${siteId}/customDomains/${finalDomain}` }
+        );
+        stepsExecuted.push({ step: 'link_domain', success: true, message: `Dominio ${finalDomain} vinculado en Firebase.` });
+      } catch (err) {
+        if (err.message.includes('ALREADY_EXISTS') || err.message.toLowerCase().includes('already exists') || err.message.includes('409')) {
+          stepsExecuted.push({ step: 'link_domain', success: true, message: `El dominio ${finalDomain} ya estaba vinculado en Firebase.` });
+        } else {
+          stepsExecuted.push({ step: 'link_domain', success: false, message: `Aviso: No se pudo vincular el dominio en Firebase (puede requerir configuración manual): ${err.message}` });
+        }
+      }
+
+      // Paso 4: Crear registro CNAME en Cloudflare via local domain manager
+      if (customSubdomain) {
+        try {
+          console.log(`[Full-Deploy] Creando CNAME en Cloudflare para "${customSubdomain}" apuntando a "${siteId}.web.app"...`);
+          const dnsBody = {
+            name: customSubdomain,
+            content: `${siteId}.web.app`,
+            proxied: false
+          };
+          const dnsPort = process.env.DOMAIN_MANAGER_PORT || 3400;
+          const dnsResponse = await fetch(`http://127.0.0.1:${dnsPort}/api/dns/cname`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(dnsBody)
+          });
+          const dnsData = await dnsResponse.json();
+          if (dnsResponse.ok && dnsData.success) {
+            stepsExecuted.push({ step: 'create_dns', success: true, message: `CNAME para ${customSubdomain} creado con éxito en Cloudflare (proxied: false).` });
+          } else {
+            stepsExecuted.push({ step: 'create_dns', success: false, message: `Aviso: No se pudo crear el CNAME en Cloudflare: ${dnsData.error || 'Error desconocido'}` });
+          }
+        } catch (err) {
+          stepsExecuted.push({ step: 'create_dns', success: false, message: `Aviso: Error al conectar con el gestor de dominios: ${err.message}` });
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      message: 'Flujo de despliegue y automatización de dominios completado.',
+      siteId,
+      projectId: activeProjectId,
+      deployUrl: `https://${siteId}.web.app`,
+      customDomain: finalDomain || null,
+      steps: stepsExecuted
+    });
+
+  } catch (err) {
+    console.error('[Full-Deploy Error]', err.message);
+    res.status(500).json({
+      success: false,
+      error: 'Error en el flujo atómico de despliegue',
+      message: err.message,
+      steps: stepsExecuted
     });
   }
 });

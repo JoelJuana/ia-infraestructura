@@ -6,7 +6,7 @@ import * as cheerio from 'cheerio';
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 4500;
+const PORT = process.env.PORT || process.env.SCRAPING_SERVICE_PORT || 3700;
 
 app.use(cors());
 app.use(express.json());

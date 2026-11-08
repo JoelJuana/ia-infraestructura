@@ -23,8 +23,21 @@ app.use(helmet({
 app.use(cors());
 app.use(express.json());
 app.use((req, res, next) => {
+  // Normalizar rutas cuando entran por el API Gateway (/api/proj/projects -> /api/projects)
+  if (req.url !== '/' && !req.url.startsWith('/ping') && !req.url.startsWith('/api/')) {
+    req.url = `/api${req.url.startsWith('/') ? '' : '/'}${req.url}`;
+  }
   console.log(`[REQUEST] ${req.method} ${req.url}`);
   next();
+});
+
+app.get('/', (req, res) => {
+  res.json({
+    ok: true,
+    service: 'infra-project-creator',
+    port: PORT,
+    status: 'online'
+  });
 });
 
 
@@ -117,7 +130,16 @@ app.post('/api/projects/create', async (req, res) => {
     activeJobs[jobId] = {
       status: 'running',
       logs: [],
-      config: { name: nameClean, type, description, author, extras, customDependencies }
+      config: { 
+        name: nameClean, 
+        type, 
+        description, 
+        author, 
+        extras, 
+        customDependencies,
+        hostingType: req.body.hostingType || 'github',
+        firebaseSiteId: req.body.firebaseSiteId || null
+      }
     };
 
     // Responder inmediatamente con el ID de la tarea asíncrona
@@ -163,7 +185,11 @@ app.post('/api/projects/create', async (req, res) => {
       }
 
       // 5.2 Registrar DNS CNAME en Cloudflare llamando a gestion-dominios
-      await createProjectCNAME(nameClean, activeJobsRef, jobId);
+      const dnsOptions = {
+        hostingType: activeJobsRef[jobId].config.hostingType,
+        firebaseSiteId: activeJobsRef[jobId].config.firebaseSiteId
+      };
+      await createProjectCNAME(nameClean, activeJobsRef, jobId, dnsOptions);
 
       // 5.3 Crear Issue inicial de tareas en GitHub si hay credenciales
       if (GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO) {

@@ -35,7 +35,7 @@ Los puertos del **3000 al 3799** están reservados exclusivamente para los micro
 | **infra-project-creator** | `3300` | `/api/proj/*` | No | Asistente de inicialización estructurada de nuevos proyectos locales. |
 | **infra-domain-manager** | `3400` | `/api/dns/*` | **SÍ** | Gestión automatizada de CNAMEs y registros DNS vía Cloudflare API. |
 | **api-design-assets** | `3500` | `/api/design/*` | No | Generación de paletas de colores premium, fuentes y mockups HTML/CSS. |
-| **api-conocimiento-rag** | `3600` | `/api/rag/*` | **SÍ** | Almacenamiento, fragmentación y búsqueda semántica de documentos (RAG). |
+| **api-conocimiento-rag** | `3600` | `/api/rag/*` | No | Almacenamiento, fragmentación y búsqueda semántica de documentos (RAG). |
 | **api-utilidades-scraping** | `3700` | `/api/scrape/*` | No | Extractor limpio de contenido web en formato Markdown. |
 
 ---

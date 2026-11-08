@@ -23,8 +23,7 @@ const SERVICES = [
 const SERVICES_REQUIRING_ENV = [
   "infra-github",
   "infra-firebase",
-  "infra-domain-manager",
-  "api-conocimiento-rag"
+  "infra-domain-manager"
 ];
 
 // Colores ANSI para salida por consola
@@ -59,6 +58,25 @@ function isPortInUse(port) {
     });
     client.connect(port, '127.0.0.1');
   });
+}
+
+/**
+ * Comprueba si un servicio responde correctamente a /ping.
+ */
+async function isServiceResponding(port) {
+  try {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), 400);
+    const res = await fetch(`http://127.0.0.1:${port}/ping`, { signal: controller.signal });
+    clearTimeout(id);
+    if (res.ok) {
+      const data = await res.json();
+      return data && (data.status === 'ok' || data.gateway === 'online' || data.success === true);
+    }
+  } catch {
+    // Ignorar fallos
+  }
+  return false;
 }
 
 /**
@@ -175,8 +193,26 @@ async function startAll(targetSvcName) {
 
     const inUse = await isPortInUse(svc.port);
     if (inUse) {
-      console.log(`  ${colors.green}[OK] ${svc.name.padEnd(23)} ya corriendo en puerto ${svc.port}${colors.reset}`);
+      const responding = await isServiceResponding(svc.port);
+      if (responding) {
+        console.log(`  ${colors.green}[OK] ${svc.name.padEnd(23)} ya corriendo en puerto ${svc.port}${colors.reset}`);
+      } else {
+        console.log(`  ${colors.red}[COLLISION] ${svc.name.padEnd(23)}: puerto ${svc.port} ocupado por un proceso externo.${colors.reset}`);
+      }
       continue;
+    }
+
+    // Auto-Bootstrap JIT (npm install si no existe node_modules)
+    const nodeModulesPath = path.join(svcPath, 'node_modules');
+    if (!fs.existsSync(nodeModulesPath)) {
+      console.log(`  ${colors.yellow}[BOOTSTRAP] ${svc.name.padEnd(23)}: node_modules no encontrado. Instalando dependencias...${colors.reset}`);
+      try {
+        execSync('npm install', { cwd: svcPath, stdio: 'inherit' });
+        console.log(`  ${colors.green}[BOOTSTRAP] ${svc.name.padEnd(23)}: dependencias instaladas con éxito.${colors.reset}`);
+      } catch (err) {
+        console.error(`  ${colors.red}[BOOTSTRAP ERROR] ${svc.name.padEnd(23)}: falló la instalación de dependencias: ${err.message}${colors.reset}`);
+        continue;
+      }
     }
 
     // Verificar si el servicio requiere .env y si el archivo existe
@@ -196,15 +232,15 @@ async function startAll(targetSvcName) {
     const escapedLogFile = logFile.replace(/\\/g, '/');
 
     if (process.platform === 'win32') {
-      // En Windows, creamos un script .bat temporal y un archivo .vbs para lanzar el proceso de forma oculta y persistente.
-      // Esto previene ventanas negras molestas en primer plano y asegura la ejecución en background.
+      // En Windows usamos wscript.exe para desacoplar completamente el proceso del Job Object de la consola
+      // y ejecutamos node.exe directamente (sin wrapper de npm) para ahorrar la mitad de procesos y RAM en ARM64.
       const tempBinDir = path.join(logDir, 'temp-bin');
       if (!fs.existsSync(tempBinDir)) {
         fs.mkdirSync(tempBinDir, { recursive: true });
       }
-      
+
       const batFile = path.join(tempBinDir, `start-${svc.name}.bat`);
-      const batContent = `@echo off\r\ncd /d "${svcPath}"\r\n${svc.cmd} > "${logFile}" 2>&1\r\n`;
+      const batContent = `@echo off\r\nset PORT=${svc.port}\r\ncd /d "${svcPath}"\r\n"${process.execPath}" server.js >> "${logFile}" 2>&1\r\n`;
       fs.writeFileSync(batFile, batContent, 'utf-8');
 
       const vbsFile = path.join(tempBinDir, `start-${svc.name}.vbs`);
@@ -215,8 +251,7 @@ async function startAll(targetSvcName) {
       const child = exec(winCmd, { windowsHide: true });
       child.unref();
     } else {
-      // En Unix/macOS, el spawn detached estándar con redirección de shell funciona perfectamente
-      const fullCommand = `${svc.cmd} > "${escapedLogFile}" 2>&1`;
+      const fullCommand = `PORT=${svc.port} "${process.execPath}" server.js >> "${escapedLogFile}" 2>&1`;
       const child = spawn(fullCommand, {
         cwd: svcPath,
         detached: true,
@@ -226,13 +261,27 @@ async function startAll(targetSvcName) {
       child.unref();
     }
 
-    await sleep(500);
+    await sleep(150);
   }
 
   console.log(`\n${colors.cyan}--- Verificación de servicios ---${colors.reset}\n`);
-  await sleep(1000);
 
-  for (const svc of SERVICES) {
+  const servicesToVerify = targetSvcName
+    ? SERVICES.filter(s => s.name === targetSvcName)
+    : SERVICES;
+
+  // Espera inteligente: comprobar cada 250ms hasta que todos los servicios objetivo estén escuchando (máx. 6s)
+  const maxWaitMs = 6000;
+  const startWait = Date.now();
+  while (Date.now() - startWait < maxWaitMs) {
+    const statuses = await Promise.all(servicesToVerify.map(s => isPortInUse(s.port)));
+    if (statuses.every(Boolean)) {
+      break;
+    }
+    await sleep(250);
+  }
+
+  for (const svc of servicesToVerify) {
     const inUse = await isPortInUse(svc.port);
     const padName = svc.name.padEnd(23);
     if (inUse) {

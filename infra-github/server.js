@@ -9,13 +9,26 @@ const { Octokit } = require('@octokit/rest');
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 4000;
+const PORT = process.env.PORT || process.env.GITHUB_SERVICE_PORT || 3100;
 
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use((req, res, next) => {
+  // Normalizar rutas cuando entran por el API Gateway (/api/git/config -> /api/config)
+  if (req.url !== '/' && !req.url.startsWith('/ping') && !req.url.startsWith('/local/') && !req.url.startsWith('/api/')) {
+    req.url = `/api${req.url.startsWith('/') ? '' : '/'}${req.url}`;
+  }
   console.log(`[REQUEST] ${req.method} ${req.url}`);
   next();
+});
+
+app.get('/', (req, res) => {
+  res.json({
+    ok: true,
+    service: 'infra-github',
+    port: PORT,
+    status: 'online'
+  });
 });
 
 let octokitInstance = null;
@@ -1134,6 +1147,10 @@ app.get('/local/diff/:projectName/:commitHash', (req, res) => {
     return res.status(404).json({ error: 'El proyecto no existe.' });
   }
 
+  if (commitHash !== 'working-tree' && !/^[a-fA-F0-9]{4,40}$/.test(commitHash)) {
+    return res.status(400).json({ error: 'Formato de commitHash inválido.' });
+  }
+
   let command = '';
   if (commitHash === 'working-tree') {
     command = 'git diff HEAD';
@@ -1157,6 +1174,10 @@ app.post('/local/revert/:projectName', (req, res) => {
 
   if (!fs.existsSync(projectDir)) {
     return res.status(404).json({ error: 'El proyecto no existe.' });
+  }
+
+  if (commitHash !== 'working-tree' && !/^[a-fA-F0-9]{4,40}$/.test(String(commitHash || ''))) {
+    return res.status(400).json({ error: 'Formato de commitHash inválido.' });
   }
 
   let command = '';

@@ -11,7 +11,7 @@ const PORT = parseInt(process.env.PORT || '3300', 10);
 const BASE_PROYECTOS_DIR = process.env.BASE_PROYECTOS_DIR || path.resolve(__dirname, '..', '..');
 
 // Intentar cargar variables de entorno del CMS de GitHub para autenticación e Issues
-const githubEnvPath = path.join('C:\\Users\\jjtei\\Desktop\\IA_Infraestructura', 'infra-github', '.env');
+const githubEnvPath = path.resolve(__dirname, '..', '..', 'infra-github', '.env');
 let githubToken = process.env.GITHUB_TOKEN;
 let githubOwner = process.env.GITHUB_OWNER;
 let githubRepo = process.env.GITHUB_REPO;

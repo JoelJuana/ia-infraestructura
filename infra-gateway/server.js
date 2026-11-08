@@ -37,13 +37,13 @@ const SERVICES = {
   proj:     { target: process.env.SERVICE_PROJECTS   || 'http://localhost:3300', name: 'infra-project-creator', dir: 'infra-project-creator', requiresEnv: false },
   dns:      { target: process.env.SERVICE_DNS        || 'http://localhost:3400', name: 'infra-domain-manager', dir: 'infra-domain-manager', requiresEnv: true },
   design:   { target: process.env.SERVICE_DESIGN     || 'http://localhost:3500', name: 'api-design-assets', dir: 'api-design-assets', requiresEnv: false },
-  rag:      { target: process.env.SERVICE_RAG        || 'http://localhost:3600', name: 'api-conocimiento-rag', dir: 'api-conocimiento-rag', requiresEnv: true },
+  rag:      { target: process.env.SERVICE_RAG        || 'http://localhost:3600', name: 'api-conocimiento-rag', dir: 'api-conocimiento-rag', requiresEnv: false },
   scrape:   { target: process.env.SERVICE_SCRAPE     || 'http://localhost:3700', name: 'api-utilidades-scraping', dir: 'api-utilidades-scraping', requiresEnv: false },
 };
 
 // ─── Middleware global ──────────────────────────────────────────────────────
 app.use(cors());
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, 'public'))); // Servir interfaz estática (Dashboard)
 app.use((req, res, next) => {
   console.log(`[GW REQUEST] ${req.method} ${req.url}`);
   next();
@@ -61,7 +61,7 @@ app.get('/api/health', async (_req, res) => {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 2000);
-      const response = await fetch(`${svc.target}/`, { signal: controller.signal });
+      const response = await fetch(`${svc.target}/ping`, { signal: controller.signal });
       clearTimeout(timeout);
       const latency = Date.now() - start;
       results[key] = {
@@ -178,9 +178,18 @@ app.post('/api/gateway/services/:service/:action', async (req, res) => {
   }
 });
 
-// ─── Redirección al Dashboard ───────────────────────────────────────────────
+// ─── Ruta raíz — Fallback si no se carga index.html ─────────────────────────
 app.get('/', (_req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  res.json({
+    ok: true,
+    data: {
+      name: 'Proyectos IA — API Gateway',
+      version: '1.0.0',
+      status: 'online',
+      dashboard: 'active'
+    },
+    message: 'Gateway operativo. Dashboard activo. Si no se visualiza la interfaz, comprueba que exista la carpeta public/ y sus archivos.'
+  });
 });
 
 // ─── Proxy Middleware — Redirección a microservicios ────────────────────────

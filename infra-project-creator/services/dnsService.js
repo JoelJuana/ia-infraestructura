@@ -92,7 +92,7 @@ function callDominiosAPI(endpoint, method, bodyObj = null) {
 /**
  * Crea un subdominio CNAME para un nuevo proyecto
  */
-async function createProjectCNAME(projectName, activeJobs, jobId) {
+async function createProjectCNAME(projectName, activeJobs, jobId, options = {}) {
   const timestamp = () => new Date().toLocaleTimeString();
   const log = (msg) => {
     if (activeJobs[jobId]) {
@@ -100,14 +100,25 @@ async function createProjectCNAME(projectName, activeJobs, jobId) {
     }
   };
 
+  const {
+    hostingType = 'github',
+    firebaseSiteId = null
+  } = options;
+
+  const content = hostingType === 'firebase'
+    ? `${firebaseSiteId || projectName.toLowerCase().replace(/\s+/g, '-')}.web.app`
+    : 'joeljuana.github.io';
+
+  const proxied = hostingType !== 'firebase';
+
   try {
-    log('Registrando subdominio CNAME en Cloudflare...');
+    log(`Registrando subdominio CNAME en Cloudflare para ${hostingType}...`);
     await ensureDominiosRunning();
     
     const dnsRes = await callDominiosAPI('/api/dns/cname', 'POST', {
       name: projectName.toLowerCase().replace(/\s+/g, '-'),
-      content: 'joeljuana.github.io',
-      proxied: true
+      content: content,
+      proxied: proxied
     });
     
     if (dnsRes.success) {
