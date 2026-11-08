@@ -1060,10 +1060,14 @@ app.post('/api/workflow', async (req, res) => {
 });
 
 // --- Endpoints de Git Local (Estructura de Microservicios) ---
-const { exec } = require('child_process');
+const { exec, execFile } = require('child_process');
+const SAFE_PROJECT_NAME_REGEX = /^[a-zA-Z0-9-_]+$/;
 
-// Helper para obtener el path local de un proyecto (soportando apps/<projectName> y raíz)
+// Helper para obtener el path local de un proyecto (soportando apps/<projectName> y raíz) con prevención de Path Traversal
 function getLocalProjectPath(projectName) {
+  if (!projectName || !SAFE_PROJECT_NAME_REGEX.test(projectName)) {
+    return null;
+  }
   const rootPath = getProyectosRootPath();
   const inApps = path.resolve(rootPath, 'apps', projectName);
   if (fs.existsSync(inApps)) {
@@ -1081,8 +1085,8 @@ app.get('/local/status/:projectName', (req, res) => {
   const { projectName } = req.params;
   const projectDir = getLocalProjectPath(projectName);
 
-  if (!fs.existsSync(projectDir)) {
-    return res.status(404).json({ error: 'El proyecto no existe.' });
+  if (!projectDir || !fs.existsSync(projectDir)) {
+    return res.status(404).json({ error: 'El proyecto no existe o el nombre no es válido.' });
   }
 
   exec('git rev-parse --is-inside-work-tree', { cwd: projectDir }, (err) => {
@@ -1113,8 +1117,8 @@ app.post('/local/init/:projectName', (req, res) => {
   const { projectName } = req.params;
   const projectDir = getLocalProjectPath(projectName);
 
-  if (!fs.existsSync(projectDir)) {
-    return res.status(404).json({ error: 'El proyecto no existe.' });
+  if (!projectDir || !fs.existsSync(projectDir)) {
+    return res.status(404).json({ error: 'El proyecto no existe o el nombre no es válido.' });
   }
 
   const command = 'git init && git config user.name "TaskForge Agent" && git config user.email "agent@taskforge.local" && git add . && git commit -m "Commit inicial de inicializacion"';
@@ -1133,8 +1137,8 @@ app.get('/local/log/:projectName', (req, res) => {
   const { projectName } = req.params;
   const projectDir = getLocalProjectPath(projectName);
 
-  if (!fs.existsSync(projectDir)) {
-    return res.status(404).json({ error: 'El proyecto no existe.' });
+  if (!projectDir || !fs.existsSync(projectDir)) {
+    return res.status(404).json({ error: 'El proyecto no existe o el nombre no es válido.' });
   }
 
   const logFormat = 'git log --max-count=20 --pretty=format:"%h|%an|%ar|%s"';
@@ -1165,22 +1169,17 @@ app.get('/local/diff/:projectName/:commitHash', (req, res) => {
   const { projectName, commitHash } = req.params;
   const projectDir = getLocalProjectPath(projectName);
 
-  if (!fs.existsSync(projectDir)) {
-    return res.status(404).json({ error: 'El proyecto no existe.' });
+  if (!projectDir || !fs.existsSync(projectDir)) {
+    return res.status(404).json({ error: 'El proyecto no existe o el nombre no es válido.' });
   }
 
   if (commitHash !== 'working-tree' && !/^[a-fA-F0-9]{4,40}$/.test(commitHash)) {
     return res.status(400).json({ error: 'Formato de commitHash inválido.' });
   }
 
-  let command = '';
-  if (commitHash === 'working-tree') {
-    command = 'git diff HEAD';
-  } else {
-    command = `git show ${commitHash}`;
-  }
+  const args = commitHash === 'working-tree' ? ['diff', 'HEAD'] : ['show', commitHash];
 
-  exec(command, { cwd: projectDir }, (err, stdout) => {
+  execFile('git', args, { cwd: projectDir }, (err, stdout) => {
     if (err) {
       return res.status(500).json({ error: 'Error al recuperar la diferencia de Git.', details: err.message });
     }
@@ -1194,51 +1193,62 @@ app.post('/local/revert/:projectName', (req, res) => {
   const { commitHash } = req.body;
   const projectDir = getLocalProjectPath(projectName);
 
-  if (!fs.existsSync(projectDir)) {
-    return res.status(404).json({ error: 'El proyecto no existe.' });
+  if (!projectDir || !fs.existsSync(projectDir)) {
+    return res.status(404).json({ error: 'El proyecto no existe o el nombre no es válido.' });
   }
 
   if (commitHash !== 'working-tree' && !/^[a-fA-F0-9]{4,40}$/.test(String(commitHash || ''))) {
     return res.status(400).json({ error: 'Formato de commitHash inválido.' });
   }
 
-  let command = '';
   if (commitHash === 'working-tree') {
-    command = 'git reset --hard HEAD && git clean -fd';
+    execFile('git', ['reset', '--hard', 'HEAD'], { cwd: projectDir }, (errReset, _out, stderrReset) => {
+      if (errReset) {
+        return res.status(500).json({ error: 'No se pudo revertir los cambios.', details: stderrReset });
+      }
+      execFile('git', ['clean', '-fd'], { cwd: projectDir }, (errClean, _outClean, stderrClean) => {
+        if (errClean) {
+          return res.status(500).json({ error: 'No se pudo limpiar archivos no rastreados.', details: stderrClean });
+        }
+        res.json({ success: true, message: 'Cambios revertidos correctamente en el repositorio.' });
+      });
+    });
   } else {
-    command = `git revert --no-edit ${commitHash}`;
+    execFile('git', ['revert', '--no-edit', commitHash], { cwd: projectDir }, (err, _stdout, stderr) => {
+      if (err) {
+        console.error('Error al revertir:', stderr);
+        return res.status(500).json({ error: 'No se pudo revertir los cambios.', details: stderr });
+      }
+      res.json({ success: true, message: 'Cambios revertidos correctamente en el repositorio.' });
+    });
   }
-
-  exec(command, { cwd: projectDir }, (err, stdout, stderr) => {
-    if (err) {
-      console.error('Error al revertir:', stderr);
-      return res.status(500).json({ error: 'No se pudo revertir los cambios.', details: stderr });
-    }
-    res.json({ success: true, message: 'Cambios revertidos correctamente en el repositorio.' });
-  });
 });
-// POST: Crear commit local
+
+// POST: Crear commit local de forma segura sin interpolación de shell
 app.post('/local/commit/:projectName', (req, res) => {
   const { projectName } = req.params;
   const { message } = req.body;
   const projectDir = getLocalProjectPath(projectName);
 
-  if (!fs.existsSync(projectDir)) {
-    return res.status(404).json({ error: 'El proyecto no existe.' });
+  if (!projectDir || !fs.existsSync(projectDir)) {
+    return res.status(404).json({ error: 'El proyecto no existe o el nombre no es válido.' });
   }
 
-  if (!message) {
+  if (!message || typeof message !== 'string' || !message.trim()) {
     return res.status(400).json({ error: 'El mensaje de commit es obligatorio.' });
   }
 
-  const command = `git add . && git commit -m "${message.replace(/"/g, '\\"')}"`;
-
-  exec(command, { cwd: projectDir }, (err, stdout, stderr) => {
-    if (err) {
-      console.error('Error al hacer commit:', stderr);
-      return res.status(500).json({ error: 'No se pudo crear el commit local.', details: stderr });
+  execFile('git', ['add', '.'], { cwd: projectDir }, (addErr, _addOut, addStderr) => {
+    if (addErr) {
+      return res.status(500).json({ error: 'No se pudieron preparar los archivos (git add).', details: addStderr });
     }
-    res.json({ success: true, message: 'Commit creado correctamente en el repositorio.', output: stdout });
+    execFile('git', ['commit', '-m', message.trim()], { cwd: projectDir }, (commitErr, stdout, stderr) => {
+      if (commitErr) {
+        console.error('Error al hacer commit:', stderr);
+        return res.status(500).json({ error: 'No se pudo crear el commit local.', details: stderr || stdout });
+      }
+      res.json({ success: true, message: 'Commit creado correctamente en el repositorio.', output: stdout });
+    });
   });
 });
 

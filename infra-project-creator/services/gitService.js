@@ -75,7 +75,7 @@ function createGitHubIssue(title, body, labels = []) {
 function runGitCommand(command, args, cwd, logFn) {
   return new Promise((resolve) => {
     logFn(`> Ejecutando git: git ${args.join(' ')}`);
-    const process = spawn(command, args, { cwd, shell: true });
+    const process = spawn(command, args, { cwd, shell: false, windowsHide: true });
 
     process.stdout.on('data', (data) => {
       const text = data.toString().trim();
@@ -136,7 +136,7 @@ async function syncProjectWithGit(projectName, activeJobs, jobId) {
 
   // 2. git commit
   const commitMsg = `feat(${projectName}): inicializar estructura de proyecto mediante la API de Scaffolding`;
-  await runGitCommand('git', ['commit', '-m', `"${commitMsg}"`], BASE_PROYECTOS_DIR, log);
+  await runGitCommand('git', ['commit', '-m', commitMsg], BASE_PROYECTOS_DIR, log);
 
   // 3. git push
   log(`Subiendo cambios al repositorio de GitHub...`);

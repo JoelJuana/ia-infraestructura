@@ -644,11 +644,19 @@ async function getFirebaseAccessToken() {
     throw new Error('Falta credencial de autenticación. Configura Service Account o ejecuta "firebase login" localmente.');
   }
 
-  // Intercambiar refresh_token por access_token
+  // Intercambiar refresh_token por access_token usando variables de entorno OAuth2
+  const oauthClientId = process.env.FIREBASE_OAUTH_CLIENT_ID;
+  const oauthClientSecret = process.env.FIREBASE_OAUTH_CLIENT_SECRET;
+  if (!oauthClientId || !oauthClientSecret) {
+    throw new Error(
+      'Faltan FIREBASE_OAUTH_CLIENT_ID o FIREBASE_OAUTH_CLIENT_SECRET en .env para intercambiar el refresh token.'
+    );
+  }
+
   const params = new URLSearchParams({
     grant_type: 'refresh_token',
-    client_id: '563584335869-fgrhgmd47bqnekij5i8b5pr03ho849e6.apps.googleusercontent.com',
-    client_secret: 'j9iVZfS8kkCEFUPaAeJV0sAi',
+    client_id: oauthClientId,
+    client_secret: oauthClientSecret,
     refresh_token: refreshToken
   });
 
@@ -1057,7 +1065,7 @@ app.post('/api/workflow', checkFirebase, async (req, res) => {
         };
         fs.writeFileSync(tempConfigPath, JSON.stringify(deployConfig, null, 2), 'utf8');
 
-        let cmd = `npx firebase deploy --only hosting --config "${tempConfigPath}" --project "${activeProjectId}" --non-interactive`;
+        let cmd = `npx firebase-tools deploy --only hosting --config "${tempConfigPath}" --project "${activeProjectId}" --non-interactive`;
         if (process.env.FIREBASE_TOKEN) {
           cmd += ` --token "${process.env.FIREBASE_TOKEN}"`;
         }

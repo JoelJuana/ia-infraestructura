@@ -7,14 +7,25 @@ const { spawn } = require('child_process');
 
 // Configuración y servicios modulares
 const { PORT, BASE_PROYECTOS_DIR, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO } = require('./config/env');
-const { scaffoldProject, deleteProjectFolder } = require('./services/scaffolderService');
+const { scaffoldProject, deleteProjectFolder, SAFE_NAME_REGEX } = require('./services/scaffolderService');
 const { createGitHubIssue, syncProjectWithGit } = require('./services/gitService');
 const { ensureDominiosRunning, callDominiosAPI, createProjectCNAME, updateProjectCNAME, deleteProjectCNAME } = require('./services/dnsService');
 
 const app = express();
 
-// Almacenamiento en memoria para trabajos de creación asíncronos (jobs)
+// Almacenamiento en memoria para trabajos de creación asíncronos (jobs) con limpieza automática
 const activeJobs = {};
+const MAX_JOBS_HISTORY = 50;
+
+function pruneOldJobs() {
+  const keys = Object.keys(activeJobs);
+  if (keys.length <= MAX_JOBS_HISTORY) return;
+  const completedKeys = keys.filter(k => activeJobs[k].status !== 'running');
+  while (Object.keys(activeJobs).length > MAX_JOBS_HISTORY && completedKeys.length > 0) {
+    const oldest = completedKeys.shift();
+    delete activeJobs[oldest];
+  }
+}
 
 // Middlewares globales de seguridad y utilidades
 app.use(helmet({
@@ -127,6 +138,7 @@ app.post('/api/projects/create', async (req, res) => {
     }
 
     const jobId = Date.now().toString();
+    pruneOldJobs();
     activeJobs[jobId] = {
       status: 'running',
       logs: [],
@@ -253,8 +265,9 @@ app.delete('/api/projects/:name', async (req, res) => {
       try {
         const runGit = (args) => {
           return new Promise((resolve) => {
-            const p = spawn('git', args, { cwd: BASE_PROYECTOS_DIR, shell: true });
+            const p = spawn('git', args, { cwd: BASE_PROYECTOS_DIR, shell: false, windowsHide: true });
             p.on('close', (code) => resolve(code === 0));
+            p.on('error', () => resolve(false));
           });
         };
         
@@ -263,7 +276,7 @@ app.delete('/api/projects/:name', async (req, res) => {
         await runGit(['add', 'projects.json']);
         
         const commitMsg = `chore(${cleanName}): eliminar proyecto y dar de baja DNS de forma automatizada`;
-        await runGit(['commit', '-m', `"${commitMsg}"`]);
+        await runGit(['commit', '-m', commitMsg]);
         await runGit(['push', 'origin', 'main']);
         gitMsg = 'Confirmado y sincronizado en GitHub.';
       } catch (e) {
@@ -295,6 +308,10 @@ app.post('/api/projects/rename', async (req, res) => {
     }
     const cleanOld = oldName.trim().replace(/\s+/g, '-');
     const cleanNew = newName.trim().replace(/\s+/g, '-');
+
+    if (!SAFE_NAME_REGEX.test(cleanOld) || !SAFE_NAME_REGEX.test(cleanNew)) {
+      return res.status(400).json({ error: 'El nombre del proyecto contiene caracteres no permitidos.' });
+    }
     
     const oldSubfolder = cleanOld.toLowerCase().startsWith('infra-') || ['crear-proyecto', 'project-creator', 'github', 'firbase', 'firebase', 'gateway', 'gestion-dominios', 'domain-manager'].includes(cleanOld.toLowerCase()) ? 'infra' : 'apps';
     const newSubfolder = cleanNew.toLowerCase().startsWith('infra-') || ['crear-proyecto', 'project-creator', 'github', 'firbase', 'firebase', 'gateway', 'gestion-dominios', 'domain-manager'].includes(cleanNew.toLowerCase()) ? 'infra' : 'apps';
@@ -355,8 +372,9 @@ app.post('/api/projects/rename', async (req, res) => {
       try {
         const runGit = (args) => {
           return new Promise((resolve) => {
-            const p = spawn('git', args, { cwd: BASE_PROYECTOS_DIR, shell: true });
+            const p = spawn('git', args, { cwd: BASE_PROYECTOS_DIR, shell: false, windowsHide: true });
             p.on('close', (code) => resolve(code === 0));
+            p.on('error', () => resolve(false));
           });
         };
         
@@ -365,7 +383,7 @@ app.post('/api/projects/rename', async (req, res) => {
         await runGit(['add', 'projects.json']);
         
         const commitMsg = `refactor(${cleanNew}): renombrar proyecto desde ${cleanOld} y actualizar DNS`;
-        await runGit(['commit', '-m', `"${commitMsg}"`]);
+        await runGit(['commit', '-m', commitMsg]);
         await runGit(['push', 'origin', 'main']);
         gitMsg = 'Confirmado y subido a GitHub con éxito.';
       } catch (e) {

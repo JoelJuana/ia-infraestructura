@@ -120,8 +120,16 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  btnClearLogs.addEventListener('click', () => {
+  btnClearLogs.addEventListener('click', async () => {
     terminalContent.innerText = '';
+    if (currentSelectedService) {
+      try {
+        await fetch(`/api/gateway/logs/${currentSelectedService}`, { method: 'DELETE' });
+        terminalContent.innerText = `[RUNNER] Logs de ${currentSelectedService} limpiados.`;
+      } catch {
+        // Ignorar si falla
+      }
+    }
   });
 
   btnCloseModal.addEventListener('click', hideModal);
@@ -248,9 +256,14 @@ function updateUI(data) {
           ${isPending && pendingAction === 'stop' ? '<i class="fa-solid fa-circle-notch spinner"></i>' : '<i class="fa-solid fa-stop"></i>'} Detener
         </button>
       `;
+      const restartBtn = `
+        <button class="btn btn-secondary" ${isPending ? 'disabled' : ''} title="Reiniciar servicio" onclick="restartService('${svc.name}')">
+          ${isPending && pendingAction === 'restart' ? '<i class="fa-solid fa-circle-notch spinner"></i>' : '<i class="fa-solid fa-rotate-right"></i>'}
+        </button>
+      `;
 
       actionButtons = `
-        ${isOnline || isDegraded ? stopBtn : startBtn}
+        ${isOnline || isDegraded ? stopBtn + restartBtn : startBtn}
         <button class="btn btn-secondary btn-logs ${currentSelectedService === svc.name ? 'active' : ''}" onclick="selectServiceLogs('${svc.name}')">
           <i class="fa-solid fa-receipt"></i> Logs
         </button>
@@ -295,6 +308,26 @@ async function startService(serviceName) {
     selectServiceLogs(serviceName);
   } catch (err) {
     alert(`No se pudo arrancar el servicio: ${err.message}`);
+  } finally {
+    pendingAction = null;
+    pendingService = null;
+    fetchHealth();
+  }
+}
+
+async function restartService(serviceName) {
+  pendingAction = 'restart';
+  pendingService = serviceName;
+  fetchHealth();
+
+  try {
+    const res = await fetch(`/api/gateway/services/${serviceName}/restart`, { method: 'POST' });
+    const result = await res.json();
+    if (!res.ok) throw new Error(result.message || 'Error al reiniciar servicio.');
+
+    selectServiceLogs(serviceName);
+  } catch (err) {
+    alert(`No se pudo reiniciar el servicio: ${err.message}`);
   } finally {
     pendingAction = null;
     pendingService = null;

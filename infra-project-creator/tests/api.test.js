@@ -201,5 +201,18 @@ describe('Suite de Pruebas - API de Scaffolding y Automatización', () => {
       expect(res.body).toHaveProperty('error');
       expect(res.body.error).toContain('Operación denegada');
     });
+
+    it('POST /api/projects/rename - Debería rechazar nombres con caracteres maliciosos o path traversal', async () => {
+      const res = await request(app)
+        .post('/api/projects/rename')
+        .send({
+          oldName: 'proyecto-valido',
+          newName: '../intento-traversal'
+        });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.body).toHaveProperty('error');
+      expect(res.body.error).toContain('caracteres no permitidos');
+    });
   });
 });

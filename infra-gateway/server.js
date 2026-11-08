@@ -127,6 +127,8 @@ app.get('/api/health', async (_req, res) => {
   const anyOnline = Object.values(results).some((r) => r.status === 'online');
   const orchestrator = process.env.pm_id !== undefined ? 'pm2' : 'standalone';
   const idleMinutes = Math.floor((Date.now() - lastActivityTimestamp) / 60000);
+  const gatewayMemoryMB = Number((process.memoryUsage().rss / (1024 * 1024)).toFixed(1));
+  const uptimeSeconds = Math.floor(process.uptime());
 
   res.json({
     ok: true,
@@ -137,6 +139,8 @@ app.get('/api/health', async (_req, res) => {
       orchestrator,
       idleMinutes,
       idleTimeoutMinutes: IDLE_TIMEOUT_MIN,
+      gatewayMemoryMB,
+      uptimeSeconds,
       timestamp: new Date().toISOString()
     },
     message: allOnline
@@ -211,12 +215,42 @@ app.get('/api/gateway/logs/:service', (req, res) => {
   }
 });
 
-// ─── Endpoints de Control de Servicios (Start/Stop individual o 'all') ──────
+// ─── Limpiar archivos de logs de servicios (individual o 'all') ─────────────
+app.delete('/api/gateway/logs/:service', (req, res) => {
+  const { service } = req.params;
+  const logDir = path.resolve(__dirname, '..', '.infra-logs');
+
+  try {
+    if (service === 'all') {
+      for (const svcName of VALID_SERVICES) {
+        const file = path.join(logDir, `${svcName}.log`);
+        if (fs.existsSync(file)) {
+          fs.writeFileSync(file, '', 'utf-8');
+        }
+      }
+      return res.json({ ok: true, message: 'Todos los archivos de logs han sido vaciados.' });
+    }
+
+    if (!VALID_SERVICES.includes(service)) {
+      return res.status(400).json({ ok: false, error: 'INVALID_SERVICE', message: 'Servicio no válido.' });
+    }
+
+    const logFile = path.join(logDir, `${service}.log`);
+    if (fs.existsSync(logFile)) {
+      fs.writeFileSync(logFile, '', 'utf-8');
+    }
+    return res.json({ ok: true, message: `Archivo de log de ${service} vaciado.` });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: 'CLEAR_ERROR', message: err.message });
+  }
+});
+
+// ─── Endpoints de Control de Servicios (Start/Stop/Restart individual o 'all') ─
 app.post('/api/gateway/services/:service/:action', async (req, res) => {
   const { service, action } = req.params;
 
-  if (action !== 'start' && action !== 'stop') {
-    return res.status(400).json({ ok: false, error: 'INVALID_ACTION', message: 'Acción no válida. Usar start o stop.' });
+  if (action !== 'start' && action !== 'stop' && action !== 'restart') {
+    return res.status(400).json({ ok: false, error: 'INVALID_ACTION', message: 'Acción no válida. Usar start, stop o restart.' });
   }
 
   if (service === 'all') {
@@ -225,6 +259,15 @@ app.post('/api/gateway/services/:service/:action', async (req, res) => {
       return res.status(result.ok ? 200 : 500).json({
         ok: result.ok,
         message: 'Todos los microservicios han sido iniciados.',
+        output: result.output
+      });
+    } else if (action === 'restart') {
+      const childServices = VALID_SERVICES.filter((s) => s !== 'infra-gateway');
+      await Promise.all(childServices.map((svc) => runServiceCommand('stop', svc)));
+      const result = await runServiceCommand('start', 'all');
+      return res.status(result.ok ? 200 : 500).json({
+        ok: result.ok,
+        message: 'Todos los microservicios de negocio han sido reiniciados.',
         output: result.output
       });
     } else {

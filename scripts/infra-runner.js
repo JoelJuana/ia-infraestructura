@@ -198,9 +198,9 @@ function rotateLogIfNeeded(serviceName) {
 }
 
 /**
- * Lanza un servicio en segundo plano desacoplado del Job Object de consola en Windows (vía WMI Win32_Process).
+ * Prepara los scripts de lanzamiento de un servicio y devuelve la ruta del VBS (Windows) o lanza el proceso (Unix).
  */
-function spawnServiceProcess(svc, svcPath, logFile) {
+function prepareOrSpawnService(svc, svcPath, logFile) {
   const logDir = path.dirname(logFile);
   if (process.platform === 'win32') {
     const tempBinDir = path.join(logDir, 'temp-bin');
@@ -215,22 +215,7 @@ function spawnServiceProcess(svc, svcPath, logFile) {
     const vbsFile = path.join(tempBinDir, `start-${svc.name}.vbs`);
     const vbsContent = `CreateObject("Wscript.Shell").Run "cmd.exe /c ""${batFile}""", 0, False\r\n`;
     fs.writeFileSync(vbsFile, vbsContent, 'utf-8');
-
-    try {
-      // Ejecutar vía WMI (WmiPrvSE.exe) escapa de JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE en shells efímeras
-      const psCmd = `Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine='wscript.exe "${vbsFile}"'} | Out-Null`;
-      execSync(`powershell.exe -NoProfile -NonInteractive -Command "${psCmd.replace(/"/g, '\\"')}"`, {
-        stdio: 'ignore',
-        windowsHide: true
-      });
-    } catch {
-      const child = spawn('wscript.exe', [vbsFile], {
-        detached: true,
-        windowsHide: true,
-        stdio: 'ignore'
-      });
-      child.unref();
-    }
+    return vbsFile;
   } else {
     const logFd = fs.openSync(logFile, 'a');
     try {
@@ -248,11 +233,37 @@ function spawnServiceProcess(svc, svcPath, logFile) {
         // Ignorar
       }
     }
+    return null;
   }
 }
 
 /**
- * Arranca los microservicios de la infraestructura.
+ * Ejecuta en lote todos los scripts VBS pendientes mediante una única invocación de PowerShell/WMI en Windows ARM64.
+ */
+function executeWindowsBatchSpawn(vbsFiles) {
+  if (!vbsFiles || vbsFiles.length === 0) return;
+  try {
+    const cimCommands = vbsFiles
+      .map((vbs) => `Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine='wscript.exe "${vbs}"'} | Out-Null`)
+      .join('; ');
+    execSync(`powershell.exe -NoProfile -NonInteractive -Command "${cimCommands.replace(/"/g, '\\"')}"`, {
+      stdio: 'ignore',
+      windowsHide: true
+    });
+  } catch {
+    for (const vbsFile of vbsFiles) {
+      const child = spawn('wscript.exe', [vbsFile], {
+        detached: true,
+        windowsHide: true,
+        stdio: 'ignore'
+      });
+      child.unref();
+    }
+  }
+}
+
+/**
+ * Arranca los microservicios de la infraestructura en paralelo.
  */
 async function startAll(targetSvcName) {
   const isGlobal = !targetSvcName || targetSvcName === 'all';
@@ -275,17 +286,27 @@ async function startAll(targetSvcName) {
     ? SERVICES.filter((s) => s.name === normalizedTarget)
     : SERVICES;
 
-  for (const svc of targetServices) {
-    const svcPath = path.join(ROOT, svc.dir);
+  // Comprobar estado inicial de puertos en paralelo
+  const initialStates = await Promise.all(
+    targetServices.map(async (svc) => {
+      const svcPath = path.join(ROOT, svc.dir);
+      const exists = fs.existsSync(svcPath);
+      if (!exists) return { svc, svcPath, exists: false, inUse: false, responding: false };
+      const inUse = await isPortInUse(svc.port);
+      const responding = inUse ? await isServiceResponding(svc.port) : false;
+      return { svc, svcPath, exists: true, inUse, responding };
+    })
+  );
 
-    if (!fs.existsSync(svcPath)) {
+  const pendingVbsFiles = [];
+
+  for (const { svc, svcPath, exists, inUse, responding } of initialStates) {
+    if (!exists) {
       console.log(`  ${colors.yellow}[WARN] ${svc.name}: carpeta no encontrada (${svc.dir})${colors.reset}`);
       continue;
     }
 
-    const inUse = await isPortInUse(svc.port);
     if (inUse) {
-      const responding = await isServiceResponding(svc.port);
       if (responding) {
         console.log(`  ${colors.green}[OK] ${svc.name.padEnd(23)} ya corriendo en puerto ${svc.port}${colors.reset}`);
       } else {
@@ -320,12 +341,20 @@ async function startAll(targetSvcName) {
 
     console.log(`  ${colors.white}[START] Arrancando ${svc.name.padEnd(23)} en puerto ${svc.port}...${colors.reset}`);
     const logFile = path.join(logDir, `${svc.name}.log`);
-    spawnServiceProcess(svc, svcPath, logFile);
+    const vbsFile = prepareOrSpawnService(svc, svcPath, logFile);
+    if (vbsFile) {
+      pendingVbsFiles.push(vbsFile);
+    }
+  }
+
+  // Lanzar todos los servicios pendientes de una sola vez en Windows
+  if (pendingVbsFiles.length > 0) {
+    executeWindowsBatchSpawn(pendingVbsFiles);
   }
 
   console.log(`\n${colors.cyan}--- Verificación de servicios ---${colors.reset}\n`);
 
-  // Espera inteligente: comprobar cada 200ms hasta que todos los servicios objetivo estén escuchando (máx. 5s)
+  // Espera inteligente: comprobar cada 150ms hasta que todos los servicios objetivo estén escuchando (máx. 5s)
   const maxWaitMs = 5000;
   const startWait = Date.now();
   while (Date.now() - startWait < maxWaitMs) {
@@ -333,18 +362,19 @@ async function startAll(targetSvcName) {
     if (statuses.every(Boolean)) {
       break;
     }
-    await sleep(200);
+    await sleep(150);
   }
 
-  for (const svc of targetServices) {
-    const inUse = await isPortInUse(svc.port);
+  const finalStates = await Promise.all(targetServices.map((s) => isPortInUse(s.port)));
+  targetServices.forEach((svc, idx) => {
+    const inUse = finalStates[idx];
     const padName = svc.name.padEnd(23);
     if (inUse) {
       console.log(`  ${colors.green}[OK]      ${padName} http://localhost:${svc.port}${colors.reset}`);
     } else {
       console.log(`  ${colors.red}[OFFLINE] ${padName} (puerto ${svc.port})${colors.reset}`);
     }
-  }
+  });
 
   console.log(`\n${colors.green}==================================================`);
   console.log(`  Gateway disponible en: http://localhost:3000`);
@@ -523,6 +553,6 @@ switch (command) {
     process.exit(0);
     break;
   default:
-    console.log(`\nUso: node infra-runner.js [start | stop | status | health] [service-name | all]\n`);
+    console.log(`\nUso: node infra-runner.js [start | stop | restart | status | health] [service-name | all]\n`);
     process.exit(1);
 }
