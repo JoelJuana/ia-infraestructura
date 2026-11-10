@@ -2,23 +2,32 @@ const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const dotenv = require('dotenv');
 const admin = require('firebase-admin');
-const { exec } = require('child_process');
+const { execFile, execSync } = require('child_process');
 const util = require('util');
+const {
+  LOCAL_HOST,
+  createLocalCorsOptions,
+  localSecurityMiddleware,
+  writeEnvFileSafe,
+  getProcessMetrics
+} = require('../packages/shared/index.cjs');
 
-const execPromise = util.promisify(exec);
+const execFilePromise = util.promisify(execFile);
 
 // Cargar variables de entorno
 dotenv.config();
 
-const os = require('os');
 const app = express();
-const PORT = process.env.PORT || process.env.FIREBASE_SERVICE_PORT || 3200;
+const PORT = Number(process.env.PORT || process.env.FIREBASE_SERVICE_PORT || 3200);
+const TEMP_KEY_PATH = path.join(__dirname, 'serviceAccountKey_temp.json');
 
-app.use(cors());
+app.use(localSecurityMiddleware);
+app.use(cors(createLocalCorsOptions()));
 app.use(express.json({ limit: '50mb' }));
-app.use((req, res, next) => {
+app.use((req, _res, next) => {
   // Normalizar rutas cuando entran por el API Gateway (/api/fb/hosting/deploy -> /api/hosting/deploy)
   if (req.url !== '/' && !req.url.startsWith('/ping') && !req.url.startsWith('/api/')) {
     req.url = `/api${req.url.startsWith('/') ? '' : '/'}${req.url}`;
@@ -30,10 +39,32 @@ let firebaseAdminApp = null;
 let isFirebaseInitialized = false;
 let initError = null;
 
+/**
+ * Elimina cualquier clave temporal generada en disco al salir del proceso.
+ */
+function cleanupTempCredentials() {
+  if (fs.existsSync(TEMP_KEY_PATH)) {
+    try {
+      fs.unlinkSync(TEMP_KEY_PATH);
+    } catch {
+      // Ignorar errores de limpieza en salida
+    }
+  }
+}
+
+process.on('exit', cleanupTempCredentials);
+process.on('SIGINT', () => {
+  cleanupTempCredentials();
+  process.exit(0);
+});
+process.on('SIGTERM', () => {
+  cleanupTempCredentials();
+  process.exit(0);
+});
+
 // Helper para inicializar Firebase Admin
 function initFirebaseAdmin() {
   try {
-    // Si ya existe una app inicializada, la eliminamos antes de reinicializar
     if (firebaseAdminApp) {
       try {
         firebaseAdminApp.delete();
@@ -56,11 +87,10 @@ function initFirebaseAdmin() {
         credential: admin.credential.cert(serviceAccount),
         projectId: serviceAccount.project_id
       });
-      // Establecer variable de entorno para que la CLI de Firebase también sepa dónde autenticarse
       process.env.GOOGLE_APPLICATION_CREDENTIALS = path.resolve(serviceAccountPath);
       isFirebaseInitialized = true;
       initError = null;
-      console.log(`✓ Firebase inicializado con éxito usando: ${serviceAccountPath}`);
+      console.log(`Firebase inicializado con éxito usando Service Account local.`);
       return true;
     }
 
@@ -74,7 +104,7 @@ function initFirebaseAdmin() {
       const serviceAccount = {
         projectId: process.env.FIREBASE_PROJECT_ID,
         clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-        privateKey: privateKey
+        privateKey
       };
 
       firebaseAdminApp = admin.initializeApp({
@@ -82,10 +112,8 @@ function initFirebaseAdmin() {
         projectId: serviceAccount.projectId
       });
 
-      // Crear un archivo temporal serviceAccountKey_temp.json para que la CLI de Firebase pueda autenticarse
-      const tempKeyPath = path.join(__dirname, 'serviceAccountKey_temp.json');
       fs.writeFileSync(
-        tempKeyPath,
+        TEMP_KEY_PATH,
         JSON.stringify(
           {
             type: 'service_account',
@@ -96,89 +124,212 @@ function initFirebaseAdmin() {
           null,
           2
         ),
-        'utf8'
+        { encoding: 'utf8', mode: 0o600 }
       );
-      process.env.GOOGLE_APPLICATION_CREDENTIALS = tempKeyPath;
+      process.env.GOOGLE_APPLICATION_CREDENTIALS = TEMP_KEY_PATH;
 
       isFirebaseInitialized = true;
       initError = null;
-      console.log('✓ Firebase inicializado con éxito usando variables individuales de entorno.');
+      console.log('Firebase inicializado con éxito usando variables individuales de entorno.');
       return true;
     }
 
-    // Si no hay configuración explícita, intentamos inicialización por defecto
+    // Opción 3: Credenciales predeterminadas del entorno (ADC)
     try {
       firebaseAdminApp = admin.initializeApp();
       isFirebaseInitialized = true;
       initError = null;
-      console.log('✓ Firebase inicializado usando credenciales predeterminadas del sistema.');
+      console.log('Firebase inicializado usando credenciales predeterminadas del sistema.');
       return true;
-    } catch (e) {
+    } catch {
       initError =
         'Falta configuración de Firebase. Configura la Service Account mediante .env o crea un archivo serviceAccountKey.json.';
-      console.warn('⚠️ Firebase no ha sido inicializado:', initError);
+      console.warn('Firebase no ha sido inicializado:', initError);
       return false;
     }
   } catch (err) {
     initError = err.message;
-    console.error('❌ Error al inicializar Firebase Admin:', err);
+    console.error('Error al inicializar Firebase Admin:', err.message);
     return false;
   }
 }
 
-// Inicialización inicial
-initFirebaseAdmin();
+if (process.env.NODE_ENV !== 'test') {
+  initFirebaseAdmin();
+}
 
-// Middleware para verificar la inicialización de Firebase antes de acceder a servicios de base de datos
-function checkFirebase(req, res, next) {
+function checkFirebase(_req, res, next) {
   if (!isFirebaseInitialized) {
     return res.status(503).json({
       error: 'Servicio Firebase no disponible',
       message: initError || 'Firebase no está inicializado. Configura tus credenciales primero.'
     });
   }
-  next();
+  return next();
 }
 
-// Helper para guardar variables en el archivo .env (reutiliza el patrón del proyecto github)
 function writeEnvFile(vars) {
   const envPath = path.join(__dirname, '.env');
-  let currentEnv = {};
+  writeEnvFileSafe(envPath, vars);
+  initFirebaseAdmin();
+}
 
-  if (fs.existsSync(envPath)) {
-    const envContent = fs.readFileSync(envPath, 'utf8');
-    envContent.split('\n').forEach(line => {
-      const parts = line.split('=');
-      if (parts.length >= 2) {
-        const key = parts[0].trim();
-        const val = parts.slice(1).join('=').trim();
-        if (key) currentEnv[key] = val;
-      }
-    });
+/**
+ * Resuelve el comando óptimo de Firebase CLI evitando sobrecarga de npx si existe instalación local/global.
+ */
+let cachedFirebaseCli = null;
+function resolveFirebaseCliExecutable() {
+  if (cachedFirebaseCli) return cachedFirebaseCli;
+
+  const isWin = process.platform === 'win32';
+  const localBin = path.resolve(__dirname, '..', 'node_modules', '.bin', isWin ? 'firebase.cmd' : 'firebase');
+  const svcBin = path.resolve(__dirname, 'node_modules', '.bin', isWin ? 'firebase.cmd' : 'firebase');
+
+  if (fs.existsSync(svcBin)) {
+    cachedFirebaseCli = { bin: svcBin, prefixArgs: [], needsCmdShim: isWin };
+    return cachedFirebaseCli;
+  }
+  if (fs.existsSync(localBin)) {
+    cachedFirebaseCli = { bin: localBin, prefixArgs: [], needsCmdShim: isWin };
+    return cachedFirebaseCli;
   }
 
-  // Mezclar nuevas variables
-  const updatedEnv = { ...currentEnv, ...vars };
+  try {
+    const finder = isWin ? 'where firebase.cmd' : 'which firebase';
+    const found = execSync(finder, { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
+      .toString()
+      .split(/\r?\n/)[0]
+      .trim();
+    if (found && fs.existsSync(found)) {
+      cachedFirebaseCli = { bin: found, prefixArgs: [], needsCmdShim: isWin };
+      return cachedFirebaseCli;
+    }
+  } catch {
+    // Fallback a npx
+  }
 
-  // Escribir el nuevo contenido
-  const newContent = Object.entries(updatedEnv)
-    .map(([k, v]) => `${k}=${v}`)
-    .join('\n');
+  cachedFirebaseCli = {
+    bin: isWin ? 'npx.cmd' : 'npx',
+    prefixArgs: ['firebase-tools'],
+    needsCmdShim: isWin
+  };
+  return cachedFirebaseCli;
+}
 
-  fs.writeFileSync(envPath, newContent, 'utf8');
+/**
+ * Ejecuta un despliegue de Firebase Hosting de forma segura (sin exponer FIREBASE_TOKEN en logs ni en línea de comandos).
+ */
+async function executeFirebaseHostingDeploy({ resolvedPath, activeProjectId, siteId = null, noCacheHeaders = false }) {
+  const suffix = `${Date.now()}_${process.pid}`;
+  const tempConfigPath = path.join(__dirname, `firebase_deploy_temp_${suffix}.json`);
 
-  // Actualizar process.env en tiempo de ejecución
-  Object.entries(vars).forEach(([k, v]) => {
-    process.env[k] = v;
-  });
+  const hostingBlock = {
+    ...(siteId ? { site: siteId } : {}),
+    public: resolvedPath,
+    ignore: ['firebase.json', '**/.*', '**/node_modules/**'],
+    rewrites: [{ source: '**', destination: '/index.html' }],
+    ...(noCacheHeaders
+      ? {
+          headers: [
+            {
+              source: '**',
+              headers: [
+                {
+                  key: 'Cache-Control',
+                  value: 'no-cache, no-store, must-revalidate, max-age=0, s-maxage=0'
+                }
+              ]
+            }
+          ]
+        }
+      : {})
+  };
 
-  // Reinicializar Firebase
-  initFirebaseAdmin();
+  try {
+    fs.writeFileSync(tempConfigPath, JSON.stringify({ hosting: hostingBlock }, null, 2), 'utf8');
+
+    const cli = resolveFirebaseCliExecutable();
+    const cliArgs = [
+      ...cli.prefixArgs,
+      'deploy',
+      '--only',
+      'hosting',
+      '--config',
+      tempConfigPath,
+      '--project',
+      activeProjectId,
+      '--non-interactive'
+    ];
+
+    if (process.env.FIREBASE_TOKEN) {
+      cliArgs.push('--token', process.env.FIREBASE_TOKEN);
+    }
+
+    // Registrar en logs siempre con el token enmascarado
+    const safeArgsLog = cliArgs.map((arg, idx) => (cliArgs[idx - 1] === '--token' ? '***REDACTED***' : arg)).join(' ');
+    console.log(`[Firebase Deploy] Ejecutando: ${path.basename(cli.bin)} ${safeArgsLog}`);
+
+    let execBin = cli.bin;
+    let execArgs = cliArgs;
+    if (cli.needsCmdShim) {
+      execBin = process.env.ComSpec || 'cmd.exe';
+      execArgs = ['/d', '/s', '/c', cli.bin, ...cliArgs];
+    }
+
+    const { stdout, stderr } = await execFilePromise(execBin, execArgs, {
+      cwd: __dirname,
+      windowsHide: true,
+      maxBuffer: 10 * 1024 * 1024,
+      env: { ...process.env }
+    });
+
+    let deployUrl = `https://${siteId || activeProjectId}.web.app`;
+    const urlMatch = stdout.match(/Hosting URL:\s*(https:\/\/\S+)/i);
+    if (urlMatch && urlMatch[1]) {
+      deployUrl = urlMatch[1];
+    }
+
+    return { stdout, stderr, deployUrl };
+  } finally {
+    if (fs.existsSync(tempConfigPath)) {
+      try {
+        fs.unlinkSync(tempConfigPath);
+      } catch {
+        // Ignorar errores de borrado temporal
+      }
+    }
+  }
+}
+
+/**
+ * Resuelve el Project ID activo usando parámetro explícito, .env, instancia Admin o .firebaserc.
+ */
+function resolveActiveProjectId(explicitProjectId) {
+  if (explicitProjectId) return explicitProjectId;
+  if (process.env.FIREBASE_PROJECT_ID) return process.env.FIREBASE_PROJECT_ID;
+  if (isFirebaseInitialized) {
+    try {
+      const fromApp = admin.app().options.projectId;
+      if (fromApp) return fromApp;
+    } catch {
+      // Ignorar
+    }
+  }
+  const firebasercPath = path.join(__dirname, '.firebaserc');
+  if (fs.existsSync(firebasercPath)) {
+    try {
+      const rc = JSON.parse(fs.readFileSync(firebasercPath, 'utf8'));
+      if (rc.projects?.default) return rc.projects.default;
+    } catch {
+      // Ignorar
+    }
+  }
+  return null;
 }
 
 // --- Endpoints de Configuración ---
 
-app.get('/', (req, res) => {
+app.get('/', (_req, res) => {
   res.json({
     ok: true,
     service: 'infra-firebase',
@@ -188,44 +339,46 @@ app.get('/', (req, res) => {
   });
 });
 
-// Health Check
-app.get('/ping', (req, res) => {
+app.get('/ping', (_req, res) => {
   res.json({
     status: 'ok',
     service: 'infra-firebase',
     port: PORT,
-    initialized: isFirebaseInitialized
+    initialized: isFirebaseInitialized,
+    ...getProcessMetrics()
   });
 });
 
-// Obtener estado de configuración
-app.get('/api/config', (req, res) => {
-  // Enmascarar la llave privada si existe
+app.get('/api/config', (_req, res) => {
   const hasPrivateKey = !!(process.env.FIREBASE_PRIVATE_KEY || '');
   const clientEmail = process.env.FIREBASE_CLIENT_EMAIL || '';
 
   let maskedEmail = '';
   if (clientEmail) {
     const parts = clientEmail.split('@');
-    if (parts.length === 2) {
-      maskedEmail = `${parts[0].substring(0, 4)}...@${parts[1]}`;
-    } else {
-      maskedEmail = '...';
+    maskedEmail = parts.length === 2 ? `${parts[0].substring(0, 4)}...@${parts[1]}` : '...';
+  }
+
+  let appProjectId = '';
+  if (isFirebaseInitialized) {
+    try {
+      appProjectId = admin.app().options.projectId || '';
+    } catch {
+      appProjectId = '';
     }
   }
 
   res.json({
     initialized: isFirebaseInitialized,
     error: initError,
-    projectId: process.env.FIREBASE_PROJECT_ID || admin.app().options.projectId || '',
+    projectId: process.env.FIREBASE_PROJECT_ID || appProjectId,
     clientEmail: maskedEmail,
-    hasPrivateKey: hasPrivateKey,
+    hasPrivateKey,
     serviceAccountKeyPath: process.env.FIREBASE_SERVICE_ACCOUNT_KEY_PATH || '',
     hasToken: !!process.env.FIREBASE_TOKEN
   });
 });
 
-// Guardar nueva configuración y reiniciar
 app.post('/api/config', (req, res) => {
   const { projectId, clientEmail, privateKey, serviceAccountKeyPath, firebaseToken } = req.body;
 
@@ -235,8 +388,7 @@ app.post('/api/config', (req, res) => {
     if (projectId) varsToUpdate.FIREBASE_PROJECT_ID = projectId;
     if (clientEmail) varsToUpdate.FIREBASE_CLIENT_EMAIL = clientEmail;
     if (privateKey) varsToUpdate.FIREBASE_PRIVATE_KEY = privateKey;
-    if (serviceAccountKeyPath)
-      varsToUpdate.FIREBASE_SERVICE_ACCOUNT_KEY_PATH = serviceAccountKeyPath;
+    if (serviceAccountKeyPath) varsToUpdate.FIREBASE_SERVICE_ACCOUNT_KEY_PATH = serviceAccountKeyPath;
     if (firebaseToken) varsToUpdate.FIREBASE_TOKEN = firebaseToken;
 
     writeEnvFile(varsToUpdate);
@@ -254,7 +406,6 @@ app.post('/api/config', (req, res) => {
 
 // --- Endpoints de Firestore ---
 
-// Crear o actualizar documento
 app.post('/api/firestore/document', checkFirebase, async (req, res) => {
   const { collection, id, data, merge } = req.body;
 
@@ -268,10 +419,9 @@ app.post('/api/firestore/document', checkFirebase, async (req, res) => {
 
     if (id) {
       docRef = db.collection(collection).doc(id);
-      const shouldMerge = merge !== false; // merge por defecto true
+      const shouldMerge = merge !== false;
       await docRef.set(data, { merge: shouldMerge });
     } else {
-      // Si no viene id, se genera automáticamente
       docRef = await db.collection(collection).add(data);
     }
 
@@ -286,7 +436,6 @@ app.post('/api/firestore/document', checkFirebase, async (req, res) => {
   }
 });
 
-// Obtener un documento por ID
 app.get('/api/firestore/document/:collection/:id', checkFirebase, async (req, res) => {
   const { collection, id } = req.params;
 
@@ -307,7 +456,6 @@ app.get('/api/firestore/document/:collection/:id', checkFirebase, async (req, re
   }
 });
 
-// Eliminar un documento por ID
 app.delete('/api/firestore/document/:collection/:id', checkFirebase, async (req, res) => {
   const { collection, id } = req.params;
 
@@ -330,7 +478,6 @@ app.delete('/api/firestore/document/:collection/:id', checkFirebase, async (req,
   }
 });
 
-// Consultas filtradas
 app.post('/api/firestore/query', checkFirebase, async (req, res) => {
   const { collection, filters, orderBy, limit, startAfter } = req.body;
 
@@ -341,34 +488,26 @@ app.post('/api/firestore/query', checkFirebase, async (req, res) => {
   try {
     let query = admin.firestore().collection(collection);
 
-    // Aplicar filtros where
     if (filters && Array.isArray(filters)) {
-      filters.forEach(f => {
+      filters.forEach((f) => {
         if (f.field && f.operator && f.value !== undefined) {
           query = query.where(f.field, f.operator, f.value);
         }
       });
     }
 
-    // Ordenar resultados
     if (orderBy) {
-      if (typeof orderBy === 'object') {
-        const field = orderBy.field;
-        const direction = orderBy.direction || 'asc';
-        if (field) {
-          query = query.orderBy(field, direction);
-        }
+      if (typeof orderBy === 'object' && orderBy.field) {
+        query = query.orderBy(orderBy.field, orderBy.direction || 'asc');
       } else if (typeof orderBy === 'string') {
         query = query.orderBy(orderBy);
       }
     }
 
-    // Paginación startAfter
     if (startAfter) {
       query = query.startAfter(startAfter);
     }
 
-    // Límite de resultados
     if (limit) {
       query = query.limit(Number(limit));
     }
@@ -376,7 +515,7 @@ app.post('/api/firestore/query', checkFirebase, async (req, res) => {
     const snapshot = await query.get();
     const results = [];
 
-    snapshot.forEach(doc => {
+    snapshot.forEach((doc) => {
       results.push({
         id: doc.id,
         data: doc.data()
@@ -386,19 +525,18 @@ app.post('/api/firestore/query', checkFirebase, async (req, res) => {
     res.json({
       success: true,
       count: results.length,
-      results: results
+      results
     });
   } catch (err) {
     res.status(500).json({ error: 'Error al consultar Firestore con filtros: ' + err.message });
   }
 });
 
-// Listar colecciones raíz
-app.get('/api/firestore/collections', checkFirebase, async (req, res) => {
+app.get('/api/firestore/collections', checkFirebase, async (_req, res) => {
   try {
     const db = admin.firestore();
     const collections = await db.listCollections();
-    const ids = collections.map(col => col.id);
+    const ids = collections.map((col) => col.id);
 
     res.json({
       success: true,
@@ -411,7 +549,6 @@ app.get('/api/firestore/collections', checkFirebase, async (req, res) => {
 
 // --- Endpoints de Firebase Auth ---
 
-// Crear usuario
 app.post('/api/auth/user', checkFirebase, async (req, res) => {
   const { email, password, displayName } = req.body;
 
@@ -440,7 +577,6 @@ app.post('/api/auth/user', checkFirebase, async (req, res) => {
   }
 });
 
-// Obtener usuario
 app.get('/api/auth/user/:uid', checkFirebase, async (req, res) => {
   const { uid } = req.params;
 
@@ -459,13 +595,12 @@ app.get('/api/auth/user/:uid', checkFirebase, async (req, res) => {
   }
 });
 
-// Listar usuarios
 app.get('/api/auth/users', checkFirebase, async (req, res) => {
   const maxResults = Number(req.query.maxResults || 100);
 
   try {
     const listUsersResult = await admin.auth().listUsers(maxResults);
-    const users = listUsersResult.users.map(u => ({
+    const users = listUsersResult.users.map((u) => ({
       uid: u.uid,
       email: u.email,
       displayName: u.displayName,
@@ -475,14 +610,13 @@ app.get('/api/auth/users', checkFirebase, async (req, res) => {
     res.json({
       success: true,
       count: users.length,
-      users: users
+      users
     });
   } catch (err) {
     res.status(500).json({ error: 'Error al listar usuarios de Auth: ' + err.message });
   }
 });
 
-// Eliminar usuario
 app.delete('/api/auth/user/:uid', checkFirebase, async (req, res) => {
   const { uid } = req.params;
 
@@ -499,7 +633,6 @@ app.delete('/api/auth/user/:uid', checkFirebase, async (req, res) => {
 
 // --- Endpoint de Firebase Hosting Deploy ---
 
-// Desplegar carpeta a Hosting
 app.post('/api/hosting/deploy', async (req, res) => {
   const { folderPath, projectId } = req.body;
 
@@ -507,7 +640,6 @@ app.post('/api/hosting/deploy', async (req, res) => {
     return res.status(400).json({ error: 'El campo "folderPath" es requerido.' });
   }
 
-  // Validar que la ruta existe
   const resolvedPath = path.resolve(folderPath);
   if (!fs.existsSync(resolvedPath)) {
     return res.status(400).json({
@@ -515,75 +647,18 @@ app.post('/api/hosting/deploy', async (req, res) => {
     });
   }
 
-  // Determinar proyecto ID a usar
-  // Prioridad: 1. Body param, 2. .env FIREBASE_PROJECT_ID, 3. .firebaserc
-  let activeProjectId = projectId || process.env.FIREBASE_PROJECT_ID;
-  if (!activeProjectId) {
-    const firebasercPath = path.join(__dirname, '.firebaserc');
-    if (fs.existsSync(firebasercPath)) {
-      try {
-        const rc = JSON.parse(fs.readFileSync(firebasercPath, 'utf8'));
-        activeProjectId = rc.projects?.default;
-      } catch (err) {
-        console.warn('Error al leer .firebaserc:', err.message);
-      }
-    }
-  }
-
+  const activeProjectId = resolveActiveProjectId(projectId);
   if (!activeProjectId) {
     return res.status(400).json({
-      error:
-        'ID del proyecto Firebase no definido. Especifícalo en la petición o configura el proyecto por defecto.'
+      error: 'ID del proyecto Firebase no definido. Especifícalo en la petición o configura el proyecto por defecto.'
     });
   }
 
-  const tempConfigPath = path.join(__dirname, 'firebase_deploy_temp.json');
   try {
-    // 1. Crear configuración temporal de hosting que apunta al public folder path
-    const deployConfig = {
-      hosting: {
-        public: resolvedPath,
-        ignore: ['firebase.json', '**/.*', '**/node_modules/**'],
-        rewrites: [
-          {
-            source: '**',
-            destination: '/index.html'
-          }
-        ]
-      }
-    };
-    fs.writeFileSync(tempConfigPath, JSON.stringify(deployConfig, null, 2), 'utf8');
-
-    // 2. Construir comando de deploy usando npx y no interactivo
-    let cmd = `npx firebase-tools deploy --only hosting --config "${tempConfigPath}" --project "${activeProjectId}" --non-interactive`;
-
-    // Si existe token explícito, lo pasamos
-    if (process.env.FIREBASE_TOKEN) {
-      cmd += ` --token "${process.env.FIREBASE_TOKEN}"`;
-    }
-
-    console.log(
-      `Desplegando hosting en proyecto "${activeProjectId}" usando ruta: "${resolvedPath}"`
-    );
-    console.log(`Comando: ${cmd}`);
-
-    // 3. Ejecutar el comando de forma asíncrona prometizada para capturar salida
-    const { stdout, stderr } = await execPromise(cmd, {
-      cwd: __dirname,
-      env: { ...process.env } // Contiene GOOGLE_APPLICATION_CREDENTIALS o variables de service account
+    const { stdout, stderr, deployUrl } = await executeFirebaseHostingDeploy({
+      resolvedPath,
+      activeProjectId
     });
-
-    // 4. Limpiar archivo de configuración temporal
-    if (fs.existsSync(tempConfigPath)) {
-      fs.unlinkSync(tempConfigPath);
-    }
-
-    // Extraer URL si está presente en stdout (Firebase CLI suele mostrar la URL final al desplegar)
-    let deployUrl = `https://${activeProjectId}.web.app`;
-    const urlMatch = stdout.match(/Hosting URL:\s*(https:\/\/\S+)/i);
-    if (urlMatch && urlMatch[1]) {
-      deployUrl = urlMatch[1];
-    }
 
     res.json({
       success: true,
@@ -593,15 +668,6 @@ app.post('/api/hosting/deploy', async (req, res) => {
       errors: stderr || null
     });
   } catch (err) {
-    // Asegurarse de limpiar el archivo temporal de todas formas
-    if (fs.existsSync(tempConfigPath)) {
-      try {
-        fs.unlinkSync(tempConfigPath);
-      } catch (_) {
-        // Ignorar errores al intentar eliminar el archivo temporal
-      }
-    }
-
     res.status(500).json({
       error: 'Fallo al desplegar en Firebase Hosting',
       message: err.message,
@@ -611,9 +677,8 @@ app.post('/api/hosting/deploy', async (req, res) => {
   }
 });
 
-// Helper para obtener el access token de Firebase (soporta Service Account y fallback a refresh token de firebase-tools.json)
+// Helper para obtener el access token de Firebase
 async function getFirebaseAccessToken() {
-  // Intento 1: Service Account original
   try {
     const credential = admin.app().options.credential;
     if (credential && typeof credential.getAccessToken === 'function') {
@@ -626,7 +691,6 @@ async function getFirebaseAccessToken() {
     console.warn('Advertencia al obtener token del Service Account (intentando fallback):', err.message);
   }
 
-  // Intento 2: Fallback mediante refresh token (FIREBASE_TOKEN o firebase-tools.json)
   let refreshToken = process.env.FIREBASE_TOKEN;
   if (!refreshToken) {
     const configPath = path.join(process.env.USERPROFILE || os.homedir(), '.config', 'configstore', 'firebase-tools.json');
@@ -644,7 +708,6 @@ async function getFirebaseAccessToken() {
     throw new Error('Falta credencial de autenticación. Configura Service Account o ejecuta "firebase login" localmente.');
   }
 
-  // Intercambiar refresh_token por access_token usando variables de entorno OAuth2
   const oauthClientId = process.env.FIREBASE_OAUTH_CLIENT_ID;
   const oauthClientSecret = process.env.FIREBASE_OAUTH_CLIENT_SECRET;
   if (!oauthClientId || !oauthClientSecret) {
@@ -674,7 +737,6 @@ async function getFirebaseAccessToken() {
   return data.access_token;
 }
 
-// Helper para realizar peticiones autenticadas a la API REST de Firebase Hosting
 async function callFirebaseHostingAPI(endpoint, method, body = null) {
   const accessToken = await getFirebaseAccessToken();
 
@@ -682,7 +744,7 @@ async function callFirebaseHostingAPI(endpoint, method, body = null) {
   const response = await fetch(url, {
     method,
     headers: {
-      'Authorization': `Bearer ${accessToken}`,
+      Authorization: `Bearer ${accessToken}`,
       'Content-Type': 'application/json'
     },
     body: body ? JSON.stringify(body) : undefined
@@ -704,11 +766,7 @@ app.post('/api/hosting/sites/create', async (req, res) => {
     return res.status(400).json({ error: 'El campo "siteId" es requerido.' });
   }
 
-  let activeProjectId = projectId || process.env.FIREBASE_PROJECT_ID;
-  if (!activeProjectId && isFirebaseInitialized) {
-    activeProjectId = admin.app().options.projectId;
-  }
-
+  const activeProjectId = resolveActiveProjectId(projectId);
   if (!activeProjectId) {
     return res.status(400).json({
       error: 'ID del proyecto Firebase no definido. Especifícalo en la petición o configura el proyecto por defecto.'
@@ -719,9 +777,7 @@ app.post('/api/hosting/sites/create', async (req, res) => {
     const result = await callFirebaseHostingAPI(
       `projects/${activeProjectId}/sites?siteId=${siteId}`,
       'POST',
-      {
-        name: `projects/${activeProjectId}/sites/${siteId}`
-      }
+      { name: `projects/${activeProjectId}/sites/${siteId}` }
     );
 
     res.json({
@@ -746,11 +802,7 @@ app.post('/api/hosting/customDomains', async (req, res) => {
     return res.status(400).json({ error: 'Los campos "siteId" y "customDomain" son requeridos.' });
   }
 
-  let activeProjectId = projectId || process.env.FIREBASE_PROJECT_ID;
-  if (!activeProjectId && isFirebaseInitialized) {
-    activeProjectId = admin.app().options.projectId;
-  }
-
+  const activeProjectId = resolveActiveProjectId(projectId);
   if (!activeProjectId) {
     return res.status(400).json({
       error: 'ID del proyecto Firebase no definido. Especifícalo en la petición o configura el proyecto por defecto.'
@@ -761,9 +813,7 @@ app.post('/api/hosting/customDomains', async (req, res) => {
     const result = await callFirebaseHostingAPI(
       `projects/${activeProjectId}/sites/${siteId}/customDomains?customDomainId=${customDomain}`,
       'POST',
-      {
-        name: `projects/${activeProjectId}/sites/${siteId}/customDomains/${customDomain}`
-      }
+      { name: `projects/${activeProjectId}/sites/${siteId}/customDomains/${customDomain}` }
     );
 
     res.json({
@@ -788,9 +838,9 @@ app.delete('/api/hosting/customDomains', async (req, res) => {
     return res.status(400).json({ error: 'Los campos "siteId" y "customDomain" son requeridos.' });
   }
 
-  let activeProjectId = projectId || process.env.FIREBASE_PROJECT_ID;
-  if (!activeProjectId && isFirebaseInitialized) {
-    activeProjectId = admin.app().options.projectId;
+  const activeProjectId = resolveActiveProjectId(projectId);
+  if (!activeProjectId) {
+    return res.status(400).json({ error: 'ID del proyecto Firebase no definido.' });
   }
 
   try {
@@ -813,6 +863,37 @@ app.delete('/api/hosting/customDomains', async (req, res) => {
   }
 });
 
+/**
+ * Envía petición de CNAME pasando primero por el API Gateway (con Auto-Wakeup) y con fallback directo al puerto 3400.
+ */
+async function registerDnsCnameViaGatewayOrDirect(dnsBody) {
+  const gatewayPort = Number(process.env.GATEWAY_PORT || 3000);
+  const dnsPort = Number(process.env.DOMAIN_MANAGER_PORT || 3400);
+  const endpoints = [
+    `http://127.0.0.1:${gatewayPort}/api/dns/cname`,
+    `http://127.0.0.1:${dnsPort}/api/dns/cname`
+  ];
+
+  let lastError = null;
+  for (const url of endpoints) {
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(dnsBody)
+      });
+      const data = await response.json();
+      if (response.ok && data.success) {
+        return { ok: true, data };
+      }
+      lastError = data.error || data.message || `HTTP ${response.status}`;
+    } catch (err) {
+      lastError = err.message;
+    }
+  }
+  return { ok: false, error: lastError || 'No se pudo contactar con el gestor de dominios.' };
+}
+
 // Desplegar carpeta a un site multisitio, vincular dominio personalizado y registrar CNAME
 app.post('/api/hosting/full-deploy', async (req, res) => {
   const { folderPath, siteId, projectId, customDomain, customSubdomain } = req.body;
@@ -826,23 +907,16 @@ app.post('/api/hosting/full-deploy', async (req, res) => {
     return res.status(400).json({ error: `La carpeta local especificada no existe: ${resolvedPath}` });
   }
 
-  let activeProjectId = projectId || process.env.FIREBASE_PROJECT_ID;
-  if (!activeProjectId && isFirebaseInitialized) {
-    activeProjectId = admin.app().options.projectId;
-  }
-
+  const activeProjectId = resolveActiveProjectId(projectId);
   if (!activeProjectId) {
-    return res.status(400).json({
-      error: 'ID del proyecto Firebase no definido.'
-    });
+    return res.status(400).json({ error: 'ID del proyecto Firebase no definido.' });
   }
 
   const stepsExecuted = [];
 
   try {
-    // Paso 1: Intentar crear el sitio de Firebase Hosting (silencioso si ya existe)
+    // Paso 1: Crear sitio de Firebase Hosting (silencioso si ya existe)
     try {
-      console.log(`[Full-Deploy] Creando sitio de Hosting "${siteId}" en "${activeProjectId}"...`);
       await callFirebaseHostingAPI(
         `projects/${activeProjectId}/sites?siteId=${siteId}`,
         'POST',
@@ -858,49 +932,19 @@ app.post('/api/hosting/full-deploy', async (req, res) => {
     }
 
     // Paso 2: Desplegar archivos al site específico
-    const tempConfigPath = path.join(__dirname, `firebase_deploy_temp_${siteId}.json`);
-    let stdout, stderr;
     try {
-      const deployConfig = {
-        hosting: {
-          site: siteId,
-          public: resolvedPath,
-          ignore: ['firebase.json', '**/.*', '**/node_modules/**'],
-          rewrites: [{ source: '**', destination: '/index.html' }],
-          headers: [
-            {
-              source: '**',
-              headers: [
-                {
-                  key: 'Cache-Control',
-                  value: 'no-cache, no-store, must-revalidate, max-age=0, s-maxage=0'
-                }
-              ]
-            }
-          ]
-        }
-      };
-      fs.writeFileSync(tempConfigPath, JSON.stringify(deployConfig, null, 2), 'utf8');
-
-      let cmd = `npx firebase-tools deploy --only hosting --config "${tempConfigPath}" --project "${activeProjectId}" --non-interactive`;
-      if (process.env.FIREBASE_TOKEN) {
-        cmd += ` --token "${process.env.FIREBASE_TOKEN}"`;
-      }
-
-      console.log(`[Full-Deploy] Desplegando en sitio "${siteId}"...`);
-      const execResult = await execPromise(cmd, { cwd: __dirname, env: { ...process.env } });
-      stdout = execResult.stdout;
-      stderr = execResult.stderr;
+      await executeFirebaseHostingDeploy({
+        resolvedPath,
+        activeProjectId,
+        siteId,
+        noCacheHeaders: true
+      });
       stepsExecuted.push({ step: 'deploy_files', success: true, message: 'Archivos desplegados con éxito.' });
     } catch (err) {
       throw new Error(`Error en el despliegue de archivos: ${err.message}`);
-    } finally {
-      if (fs.existsSync(tempConfigPath)) {
-        try { fs.unlinkSync(tempConfigPath); } catch (_) {}
-      }
     }
 
-    // Paso 3: Vincular dominio personalizado en Firebase Hosting si se solicita
+    // Paso 3: Vincular dominio personalizado si se solicita
     let finalDomain = customDomain;
     if (customSubdomain && !finalDomain) {
       const baseDomain = process.env.CLOUDFLARE_BASE_DOMAIN || 'gironacc.com';
@@ -909,7 +953,6 @@ app.post('/api/hosting/full-deploy', async (req, res) => {
 
     if (finalDomain) {
       try {
-        console.log(`[Full-Deploy] Vinculando dominio personalizado "${finalDomain}" al sitio "${siteId}"...`);
         await callFirebaseHostingAPI(
           `projects/${activeProjectId}/sites/${siteId}/customDomains?customDomainId=${finalDomain}`,
           'POST',
@@ -920,33 +963,21 @@ app.post('/api/hosting/full-deploy', async (req, res) => {
         if (err.message.includes('ALREADY_EXISTS') || err.message.toLowerCase().includes('already exists') || err.message.includes('409')) {
           stepsExecuted.push({ step: 'link_domain', success: true, message: `El dominio ${finalDomain} ya estaba vinculado en Firebase.` });
         } else {
-          stepsExecuted.push({ step: 'link_domain', success: false, message: `Aviso: No se pudo vincular el dominio en Firebase (puede requerir configuración manual): ${err.message}` });
+          stepsExecuted.push({ step: 'link_domain', success: false, message: `Aviso: No se pudo vincular el dominio en Firebase: ${err.message}` });
         }
       }
 
-      // Paso 4: Crear registro CNAME en Cloudflare via local domain manager
+      // Paso 4: Crear registro CNAME vía Gateway centralizado
       if (customSubdomain) {
-        try {
-          console.log(`[Full-Deploy] Creando CNAME en Cloudflare para "${customSubdomain}" apuntando a "${siteId}.web.app"...`);
-          const dnsBody = {
-            name: customSubdomain,
-            content: `${siteId}.web.app`,
-            proxied: false
-          };
-          const dnsPort = process.env.DOMAIN_MANAGER_PORT || 3400;
-          const dnsResponse = await fetch(`http://127.0.0.1:${dnsPort}/api/dns/cname`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(dnsBody)
-          });
-          const dnsData = await dnsResponse.json();
-          if (dnsResponse.ok && dnsData.success) {
-            stepsExecuted.push({ step: 'create_dns', success: true, message: `CNAME para ${customSubdomain} creado con éxito en Cloudflare (proxied: false).` });
-          } else {
-            stepsExecuted.push({ step: 'create_dns', success: false, message: `Aviso: No se pudo crear el CNAME en Cloudflare: ${dnsData.error || 'Error desconocido'}` });
-          }
-        } catch (err) {
-          stepsExecuted.push({ step: 'create_dns', success: false, message: `Aviso: Error al conectar con el gestor de dominios: ${err.message}` });
+        const dnsRes = await registerDnsCnameViaGatewayOrDirect({
+          name: customSubdomain,
+          content: `${siteId}.web.app`,
+          proxied: false
+        });
+        if (dnsRes.ok) {
+          stepsExecuted.push({ step: 'create_dns', success: true, message: `CNAME para ${customSubdomain} creado con éxito en Cloudflare (proxied: false).` });
+        } else {
+          stepsExecuted.push({ step: 'create_dns', success: false, message: `Aviso: No se pudo crear el CNAME en Cloudflare: ${dnsRes.error}` });
         }
       }
     }
@@ -960,7 +991,6 @@ app.post('/api/hosting/full-deploy', async (req, res) => {
       customDomain: finalDomain || null,
       steps: stepsExecuted
     });
-
   } catch (err) {
     console.error('[Full-Deploy Error]', err.message);
     res.status(500).json({
@@ -972,7 +1002,7 @@ app.post('/api/hosting/full-deploy', async (req, res) => {
   }
 });
 
-// --- Endpoint de Workflow Multi-paso (secuencia automatizada) ---
+// --- Endpoint de Workflow Multi-paso ---
 
 app.post('/api/workflow', checkFirebase, async (req, res) => {
   const { steps } = req.body;
@@ -996,8 +1026,6 @@ app.post('/api/workflow', checkFirebase, async (req, res) => {
     }
 
     try {
-      console.log(`Ejecutando paso de workflow ${stepIndex}: ${action}`);
-
       if (action === 'firestore.set') {
         const { collection, id, data, merge } = step;
         if (!collection || !data) {
@@ -1023,67 +1051,27 @@ app.post('/api/workflow', checkFirebase, async (req, res) => {
           throw new Error('Faltan campos "collection" o "id" para firestore.delete');
         }
         await admin.firestore().collection(collection).doc(id).delete();
-        results.push({
-          step: stepIndex,
-          action,
-          success: true
-        });
+        results.push({ step: stepIndex, action, success: true });
       } else if (action === 'hosting.deploy') {
         const { folderPath, projectId } = step;
         if (!folderPath) {
           throw new Error('Falta el campo "folderPath" para hosting.deploy');
         }
 
-        // Simular llamada interna a la lógica de Hosting Deploy para evitar lanzar subprocesos anidados y
-        // mantener el código libre de dependencias complejas. Usamos fetch local o llamamos al helper de deploy.
-        // Como este es un proceso asíncrono largo, implementamos la misma lógica del handler directamente aquí.
         const resolvedPath = path.resolve(folderPath);
         if (!fs.existsSync(resolvedPath)) {
           throw new Error(`La carpeta local especificada no existe: ${resolvedPath}`);
         }
 
-        let activeProjectId = projectId || process.env.FIREBASE_PROJECT_ID;
-        if (!activeProjectId) {
-          const firebasercPath = path.join(__dirname, '.firebaserc');
-          if (fs.existsSync(firebasercPath)) {
-            const rc = JSON.parse(fs.readFileSync(firebasercPath, 'utf8'));
-            activeProjectId = rc.projects?.default;
-          }
-        }
-
+        const activeProjectId = resolveActiveProjectId(projectId);
         if (!activeProjectId) {
           throw new Error('ID del proyecto Firebase no definido para el deploy.');
         }
 
-        const tempConfigPath = path.join(__dirname, 'firebase_deploy_temp.json');
-        const deployConfig = {
-          hosting: {
-            public: resolvedPath,
-            ignore: ['firebase.json', '**/.*', '**/node_modules/**'],
-            rewrites: [{ source: '**', destination: '/index.html' }]
-          }
-        };
-        fs.writeFileSync(tempConfigPath, JSON.stringify(deployConfig, null, 2), 'utf8');
-
-        let cmd = `npx firebase-tools deploy --only hosting --config "${tempConfigPath}" --project "${activeProjectId}" --non-interactive`;
-        if (process.env.FIREBASE_TOKEN) {
-          cmd += ` --token "${process.env.FIREBASE_TOKEN}"`;
-        }
-
-        const { stdout } = await execPromise(cmd, {
-          cwd: __dirname,
-          env: { ...process.env }
+        const { deployUrl } = await executeFirebaseHostingDeploy({
+          resolvedPath,
+          activeProjectId
         });
-
-        if (fs.existsSync(tempConfigPath)) {
-          fs.unlinkSync(tempConfigPath);
-        }
-
-        let deployUrl = `https://${activeProjectId}.web.app`;
-        const urlMatch = stdout.match(/Hosting URL:\s*(https:\/\/\S+)/i);
-        if (urlMatch && urlMatch[1]) {
-          deployUrl = urlMatch[1];
-        }
 
         results.push({
           step: stepIndex,
@@ -1107,7 +1095,6 @@ app.post('/api/workflow', checkFirebase, async (req, res) => {
         throw new Error(`Acción desconocida o no implementada en workflow: ${action}`);
       }
     } catch (err) {
-      console.error(`Error en paso de workflow ${stepIndex}:`, err.message);
       results.push({
         step: stepIndex,
         action,
@@ -1115,7 +1102,7 @@ app.post('/api/workflow', checkFirebase, async (req, res) => {
         error: err.message
       });
       errorOccurred = true;
-      break; // Abortar flujo si un paso falla
+      break;
     }
   }
 
@@ -1125,28 +1112,31 @@ app.post('/api/workflow', checkFirebase, async (req, res) => {
   });
 });
 
-// --- Endpoint de Apagado (Shutdown) ---
-app.post('/api/shutdown', (req, res) => {
+let serverInstance = null;
+
+app.post('/api/shutdown', (_req, res) => {
   res.json({ success: true, message: 'Servidor apagándose...' });
   console.log('Recibida petición de apagado. Cerrando servidor de Firebase...');
   setTimeout(() => {
-    // Si creamos un archivo serviceAccountKey_temp.json temporal, lo limpiamos al apagar
-    const tempKeyPath = path.join(__dirname, 'serviceAccountKey_temp.json');
-    if (fs.existsSync(tempKeyPath)) {
-      try {
-        fs.unlinkSync(tempKeyPath);
-        console.log('Limpiado serviceAccountKey_temp.json temporal.');
-      } catch (_) {
-        // Ignorar errores al limpiar el archivo temporal de service account
-      }
-    }
-    process.exit(0);
-  }, 1000);
+    cleanupTempCredentials();
+    if (serverInstance) serverInstance.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 400).unref();
+  }, 300);
 });
 
-// Iniciar servidor
-app.listen(PORT, () => {
-  console.log('=================================================');
-  console.log(` Firebase Automation Service corriendo en: http://localhost:${PORT}`);
-  console.log('=================================================');
+app.use((err, _req, res, next) => {
+  if (err && err.status === 403) {
+    return res.status(403).json({ ok: false, error: 'CORS_BLOCKED', message: err.message });
+  }
+  return next(err);
 });
+
+if (process.env.NODE_ENV !== 'test') {
+  serverInstance = app.listen(PORT, LOCAL_HOST, () => {
+    console.log('=================================================');
+    console.log(` Firebase Automation Service corriendo en: http://${LOCAL_HOST}:${PORT}`);
+    console.log('=================================================');
+  });
+}
+
+module.exports = { app };
