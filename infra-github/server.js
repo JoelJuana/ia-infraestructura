@@ -4,14 +4,22 @@ const fs = require('fs');
 const path = require('path');
 const dotenv = require('dotenv');
 const { Octokit } = require('@octokit/rest');
+const {
+  LOCAL_HOST,
+  createLocalCorsOptions,
+  localSecurityMiddleware,
+  writeEnvFileSafe,
+  getProcessMetrics
+} = require('../packages/shared/index.cjs');
 
 // Cargar variables de entorno
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || process.env.GITHUB_SERVICE_PORT || 3100;
+const PORT = Number(process.env.PORT || process.env.GITHUB_SERVICE_PORT || 3100);
 
-app.use(cors());
+app.use(localSecurityMiddleware);
+app.use(cors(createLocalCorsOptions()));
 app.use(express.json({ limit: '50mb' }));
 app.use((req, res, next) => {
   // Normalizar rutas cuando entran por el API Gateway (/api/git/config -> /api/config)
@@ -51,38 +59,10 @@ function resetOctokit() {
   octokitInstance = null;
 }
 
-// Helper para guardar variables en el archivo .env
+// Helper para guardar variables en el archivo .env de forma atómica
 function writeEnvFile(vars) {
   const envPath = path.join(__dirname, '.env');
-  let currentEnv = {};
-
-  if (fs.existsSync(envPath)) {
-    const envContent = fs.readFileSync(envPath, 'utf8');
-    envContent.split('\n').forEach(line => {
-      const parts = line.split('=');
-      if (parts.length >= 2) {
-        const key = parts[0].trim();
-        const val = parts.slice(1).join('=').trim();
-        if (key) currentEnv[key] = val;
-      }
-    });
-  }
-
-  // Mezclar nuevas variables
-  const updatedEnv = { ...currentEnv, ...vars };
-
-  // Re-escribir archivo
-  const newContent = Object.entries(updatedEnv)
-    .map(([k, v]) => `${k}=${v}`)
-    .join('\n');
-
-  fs.writeFileSync(envPath, newContent, 'utf8');
-
-  // Actualizar process.env en tiempo de ejecución
-  Object.entries(vars).forEach(([k, v]) => {
-    process.env[k] = v;
-  });
-
+  writeEnvFileSafe(envPath, vars);
   resetOctokit();
 }
 
@@ -731,9 +711,14 @@ app.post('/api/media', async (req, res) => {
 
 // --- Nuevos Endpoints para la Automatización vía Skill ---
 
-// Health check rápido para el Skill
-app.get('/ping', (req, res) => {
-  res.json({ status: 'ok' });
+// Health check rápido para el Skill y el Gateway
+app.get('/ping', (_req, res) => {
+  res.json({
+    status: 'ok',
+    service: 'infra-github',
+    port: PORT,
+    ...getProcessMetrics()
+  });
 });
 
 // Listar repositorios del usuario autenticado
@@ -1080,7 +1065,7 @@ function getLocalProjectPath(projectName) {
   return path.resolve(__dirname, '..', projectName);
 }
 
-// GET: Estado local de Git
+// GET: Estado local de Git (sin invocar shell)
 app.get('/local/status/:projectName', (req, res) => {
   const { projectName } = req.params;
   const projectDir = getLocalProjectPath(projectName);
@@ -1089,17 +1074,17 @@ app.get('/local/status/:projectName', (req, res) => {
     return res.status(404).json({ error: 'El proyecto no existe o el nombre no es válido.' });
   }
 
-  exec('git rev-parse --is-inside-work-tree', { cwd: projectDir }, (err) => {
+  execFile('git', ['rev-parse', '--is-inside-work-tree'], { cwd: projectDir, windowsHide: true }, (err) => {
     if (err) {
       return res.json({ initialized: false });
     }
 
-    exec('git branch --show-current', { cwd: projectDir }, (errBranch, stdoutBranch) => {
-      const branch = stdoutBranch.trim() || 'master';
+    execFile('git', ['branch', '--show-current'], { cwd: projectDir, windowsHide: true }, (_errBranch, stdoutBranch) => {
+      const branch = (stdoutBranch || '').trim() || 'master';
 
-      exec('git status --porcelain', { cwd: projectDir }, (errStatus, stdoutStatus) => {
+      execFile('git', ['status', '--porcelain'], { cwd: projectDir, windowsHide: true }, (_errStatus, stdoutStatus) => {
         const files = [];
-        const lines = stdoutStatus.split('\n');
+        const lines = (stdoutStatus || '').split('\n');
         for (const line of lines) {
           if (!line.trim()) continue;
           const statusChar = line.substring(0, 2).trim();
@@ -1112,7 +1097,7 @@ app.get('/local/status/:projectName', (req, res) => {
   });
 });
 
-// POST: Inicializar repositorio Git local
+// POST: Inicializar repositorio Git local sin interpolación de shell
 app.post('/local/init/:projectName', (req, res) => {
   const { projectName } = req.params;
   const projectDir = getLocalProjectPath(projectName);
@@ -1121,18 +1106,30 @@ app.post('/local/init/:projectName', (req, res) => {
     return res.status(404).json({ error: 'El proyecto no existe o el nombre no es válido.' });
   }
 
-  const command = 'git init && git config user.name "TaskForge Agent" && git config user.email "agent@taskforge.local" && git add . && git commit -m "Commit inicial de inicializacion"';
-  
-  exec(command, { cwd: projectDir }, (err, stdout, stderr) => {
-    if (err) {
-      console.error('Error al inicializar Git:', stderr);
-      return res.status(500).json({ error: 'No se pudo inicializar Git en el proyecto.', details: stderr });
+  const runGitStep = (args) =>
+    new Promise((resolve, reject) => {
+      execFile('git', args, { cwd: projectDir, windowsHide: true }, (err, stdout, stderr) => {
+        if (err) return reject(new Error(stderr || err.message));
+        resolve(stdout);
+      });
+    });
+
+  (async () => {
+    try {
+      await runGitStep(['init']);
+      await runGitStep(['config', 'user.name', 'TaskForge Agent']);
+      await runGitStep(['config', 'user.email', 'agent@taskforge.local']);
+      await runGitStep(['add', '.']);
+      await runGitStep(['commit', '-m', 'Commit inicial de inicializacion']);
+      res.json({ success: true, message: 'Repositorio Git inicializado y primer commit creado.' });
+    } catch (err) {
+      console.error('Error al inicializar Git:', err.message);
+      res.status(500).json({ error: 'No se pudo inicializar Git en el proyecto.', details: err.message });
     }
-    res.json({ success: true, message: 'Repositorio Git inicializado y primer commit creado.' });
-  });
+  })();
 });
 
-// GET: Obtener log local de commits
+// GET: Obtener log local de commits sin shell
 app.get('/local/log/:projectName', (req, res) => {
   const { projectName } = req.params;
   const projectDir = getLocalProjectPath(projectName);
@@ -1141,15 +1138,13 @@ app.get('/local/log/:projectName', (req, res) => {
     return res.status(404).json({ error: 'El proyecto no existe o el nombre no es válido.' });
   }
 
-  const logFormat = 'git log --max-count=20 --pretty=format:"%h|%an|%ar|%s"';
-  
-  exec(logFormat, { cwd: projectDir }, (err, stdout) => {
+  execFile('git', ['log', '--max-count=20', '--pretty=format:%h|%an|%ar|%s'], { cwd: projectDir, windowsHide: true }, (err, stdout) => {
     if (err) {
       return res.json([]);
     }
 
     const commits = [];
-    const lines = stdout.split('\n');
+    const lines = (stdout || '').split('\n');
     for (const line of lines) {
       if (!line.trim()) continue;
       const parts = line.split('|');
@@ -1157,7 +1152,7 @@ app.get('/local/log/:projectName', (req, res) => {
         hash: parts[0],
         author: parts[1],
         date: parts[2],
-        message: parts[3]
+        message: parts.slice(3).join('|')
       });
     }
     res.json(commits);
@@ -1253,20 +1248,34 @@ app.post('/local/commit/:projectName', (req, res) => {
 });
 
 
+let serverInstance = null;
+
 // Endpoint de apagado (shutdown) para liberar recursos tras su uso
-app.post('/api/shutdown', (req, res) => {
+app.post('/api/shutdown', (_req, res) => {
   res.json({ success: true, message: 'Servidor apagándose...' });
   console.log('Recibida petición de apagado. Cerrando servidor...');
   setTimeout(() => {
-    process.exit(0);
-  }, 1000);
+    if (serverInstance) serverInstance.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 400).unref();
+  }, 300);
 });
 
-// Iniciar servidor
-app.listen(PORT, () => {
-  console.log('=================================================');
-  console.log(` GitPublish CMS corriendo en: http://localhost:${PORT}`);
-  console.log('=================================================');
+app.use((err, _req, res, next) => {
+  if (err && err.status === 403) {
+    return res.status(403).json({ ok: false, error: 'CORS_BLOCKED', message: err.message });
+  }
+  return next(err);
 });
+
+// Iniciar servidor restringido a loopback 127.0.0.1
+if (process.env.NODE_ENV !== 'test') {
+  serverInstance = app.listen(PORT, LOCAL_HOST, () => {
+    console.log('=================================================');
+    console.log(` GitPublish CMS corriendo en: http://${LOCAL_HOST}:${PORT}`);
+    console.log('=================================================');
+  });
+}
+
+module.exports = { app };
 
 

@@ -43,6 +43,7 @@ const POLL_INTERVAL_LOGS = 3000;
 let currentSelectedService = null;
 let healthIntervalId = null;
 let logsIntervalId = null;
+let logsEventSource = null;
 
 // Modal confirmación
 let pendingAction = null;
@@ -56,6 +57,7 @@ const suiteHealthPulse = document.getElementById('suite-health-pulse');
 const suiteHealthBox = document.getElementById('suite-health-box');
 const orchestratorVal = document.getElementById('orchestrator-val');
 const idleVal = document.getElementById('idle-val');
+const ramVal = document.getElementById('ram-val');
 
 const btnRefreshAll = document.getElementById('btn-refresh-all');
 const btnStartAll = document.getElementById('btn-start-all');
@@ -175,12 +177,20 @@ function updateUI(data) {
     idleVal.innerText = `${data.idleMinutes}m / ${data.idleTimeoutMinutes || 30}m`;
   }
 
+  if (ramVal && data.totalSuiteMemoryMB !== undefined) {
+    ramVal.innerText = `${data.totalSuiteMemoryMB} MB`;
+  }
+
   if (status === 'healthy') {
     suiteHealthText.innerText = 'SALUDABLE';
     suiteHealthPulse.className = 'pulse-dot green';
     suiteHealthBox.style.borderColor = 'rgba(16, 185, 129, 0.3)';
   } else if (status === 'degraded') {
-    suiteHealthText.innerText = 'DEGRADADO';
+    suiteHealthText.innerText = data.autoWakeup ? 'ACTIVO (JIT)' : 'DEGRADADO';
+    suiteHealthPulse.className = 'pulse-dot orange';
+    suiteHealthBox.style.borderColor = 'rgba(245, 158, 11, 0.3)';
+  } else if (status === 'standby') {
+    suiteHealthText.innerText = 'STANDBY (JIT)';
     suiteHealthPulse.className = 'pulse-dot orange';
     suiteHealthBox.style.borderColor = 'rgba(245, 158, 11, 0.3)';
   } else {
@@ -195,6 +205,7 @@ function updateUI(data) {
     url: 'http://localhost:3000',
     status: 'online',
     latencyMs: 1,
+    memoryMB: data.gatewayMemoryMB || null,
     envExists: true,
     isGateway: true
   };
@@ -217,6 +228,15 @@ function updateUI(data) {
       latencyHTML = `
         <span class="meta-badge latency ${isSlow ? 'slow' : ''}">
           <i class="fa-solid fa-gauge-high"></i> ${svc.latencyMs} ms
+        </span>
+      `;
+    }
+
+    let memoryHTML = '';
+    if (isOnline && typeof svc.memoryMB === 'number') {
+      memoryHTML = `
+        <span class="meta-badge latency">
+          <i class="fa-solid fa-memory"></i> ${svc.memoryMB} MB
         </span>
       `;
     }
@@ -281,6 +301,7 @@ function updateUI(data) {
         <p class="service-desc">${meta.desc}</p>
         <div class="service-meta-row">
           ${latencyHTML}
+          ${memoryHTML}
           ${envHTML}
         </div>
       </div>
@@ -369,17 +390,57 @@ async function executePendingAction() {
 }
 
 /* ==========================================================================
-   GESTIÓN DE LOGS (TERMINAL VIRTUAL)
+   GESTIÓN DE LOGS (TERMINAL VIRTUAL CON STREAMING SSE + FALLBACK)
    ========================================================================== */
+function renderLogsText(logsText) {
+  const isAtBottom = terminalContent.scrollHeight - terminalContent.clientHeight <= terminalContent.scrollTop + 50;
+  terminalContent.innerText = logsText;
+  if (isAtBottom) {
+    terminalContent.scrollTop = terminalContent.scrollHeight;
+  }
+}
+
 function selectServiceLogs(serviceName) {
   currentSelectedService = serviceName;
   activeLogTitle.innerText = serviceName === 'all' ? 'CONSOLA GLOBAL' : serviceName;
   terminalContent.innerText = `Cargando logs de ${serviceName === 'all' ? 'todos los servicios' : serviceName}...`;
 
-  if (logsIntervalId) clearInterval(logsIntervalId);
+  if (logsIntervalId) {
+    clearInterval(logsIntervalId);
+    logsIntervalId = null;
+  }
+  if (logsEventSource) {
+    logsEventSource.close();
+    logsEventSource = null;
+  }
 
-  fetchLogs(serviceName);
-  logsIntervalId = setInterval(() => fetchLogs(serviceName), POLL_INTERVAL_LOGS);
+  if (typeof window.EventSource !== 'undefined') {
+    logsEventSource = new EventSource(`/api/gateway/logs/${serviceName}/stream`);
+    logsEventSource.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        if (payload.ok) {
+          renderLogsText(payload.logs);
+        }
+      } catch {
+        // Ignorar errores de parseo puntual
+      }
+    };
+    logsEventSource.onerror = () => {
+      if (logsEventSource) {
+        logsEventSource.close();
+        logsEventSource = null;
+      }
+      if (!logsIntervalId) {
+        fetchLogs(serviceName);
+        logsIntervalId = setInterval(() => fetchLogs(serviceName), POLL_INTERVAL_LOGS);
+      }
+    };
+  } else {
+    fetchLogs(serviceName);
+    logsIntervalId = setInterval(() => fetchLogs(serviceName), POLL_INTERVAL_LOGS);
+  }
+
   fetchHealth();
 }
 
@@ -390,11 +451,7 @@ async function fetchLogs(serviceName) {
 
     const result = await res.json();
     if (result.ok) {
-      const isAtBottom = terminalContent.scrollHeight - terminalContent.clientHeight <= terminalContent.scrollTop + 50;
-      terminalContent.innerText = result.logs;
-      if (isAtBottom) {
-        terminalContent.scrollTop = terminalContent.scrollHeight;
-      }
+      renderLogsText(result.logs);
     }
   } catch (err) {
     terminalContent.innerText = `[DASHBOARD ERROR] No se pudieron recuperar los logs del servicio ${serviceName}: ${err.message}`;

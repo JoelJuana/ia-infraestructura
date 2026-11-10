@@ -1,95 +1,104 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import shared from '../packages/shared/index.cjs';
+
+const {
+  LOCAL_HOST,
+  createLocalCorsOptions,
+  localSecurityMiddleware,
+  getProcessMetrics
+} = shared;
 
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || process.env.DESIGN_ASSETS_PORT || 3500;
+const PORT = Number(process.env.PORT || process.env.DESIGN_ASSETS_PORT || 3500);
 
-app.use(cors());
+app.use(localSecurityMiddleware);
+app.use(cors(createLocalCorsOptions()));
 app.use(express.json());
 
 // Logger simple para depuracion
-app.use((req, res, next) => {
+app.use((req, _res, next) => {
   console.log(`[REQUEST] ${req.method} ${req.url}`);
   next();
 });
 
 // Paletas de colores premium curadas
 const PALETTES = {
-  "dark-premium": {
-    name: "Dark Premium",
-    background: "#0d0e12",
-    surface: "#161820",
-    primary: "#6366f1", // Indigo
-    secondary: "#a855f7", // Purple
-    text: "#f3f4f6",
-    muted: "#9ca3af",
-    border: "#1f2937",
-    glow: "rgba(99, 102, 241, 0.15)"
+  'dark-premium': {
+    name: 'Dark Premium',
+    background: '#0d0e12',
+    surface: '#161820',
+    primary: '#6366f1',
+    secondary: '#a855f7',
+    text: '#f3f4f6',
+    muted: '#9ca3af',
+    border: '#1f2937',
+    glow: 'rgba(99, 102, 241, 0.15)'
   },
-  "glassmorphism": {
-    name: "Glassmorphism Ocean",
-    background: "linear-gradient(135deg, #0f172a, #1e1b4b)",
-    surface: "rgba(255, 255, 255, 0.03)",
-    primary: "#0ea5e9", // Sky
-    secondary: "#2dd4bf", // Teal
-    text: "#f8fafc",
-    muted: "#64748b",
-    border: "rgba(255, 255, 255, 0.08)",
-    backdropFilter: "blur(12px)"
+  glassmorphism: {
+    name: 'Glassmorphism Ocean',
+    background: 'linear-gradient(135deg, #0f172a, #1e1b4b)',
+    surface: 'rgba(255, 255, 255, 0.03)',
+    primary: '#0ea5e9',
+    secondary: '#2dd4bf',
+    text: '#f8fafc',
+    muted: '#64748b',
+    border: 'rgba(255, 255, 255, 0.08)',
+    backdropFilter: 'blur(12px)'
   },
-  "minimalist-light": {
-    name: "Pure Minimalist",
-    background: "#fafafa",
-    surface: "#ffffff",
-    primary: "#18181b", // Zinc 900
-    secondary: "#71717a", // Zinc 500
-    text: "#09090b",
-    muted: "#a1a1aa",
-    border: "#e4e4e7",
-    glow: "rgba(24, 24, 27, 0.05)"
+  'minimalist-light': {
+    name: 'Pure Minimalist',
+    background: '#fafafa',
+    surface: '#ffffff',
+    primary: '#18181b',
+    secondary: '#71717a',
+    text: '#09090b',
+    muted: '#a1a1aa',
+    border: '#e4e4e7',
+    glow: 'rgba(24, 24, 27, 0.05)'
   },
-  "cyberpunk": {
-    name: "Cyber Neon",
-    background: "#05050a",
-    surface: "#0c0c14",
-    primary: "#ff007f", // Neon Rose
-    secondary: "#00f0ff", // Cyan
-    text: "#ffffff",
-    muted: "#8a8a9d",
-    border: "#202030",
-    glow: "rgba(255, 0, 127, 0.25)"
+  cyberpunk: {
+    name: 'Cyber Neon',
+    background: '#05050a',
+    surface: '#0c0c14',
+    primary: '#ff007f',
+    secondary: '#00f0ff',
+    text: '#ffffff',
+    muted: '#8a8a9d',
+    border: '#202030',
+    glow: 'rgba(255, 0, 127, 0.25)'
   }
 };
 
 // Combinaciones premium de tipografia de Google Fonts
 const FONTS = [
   {
-    theme: "Modern Tech / SaaS",
-    header: "Outfit",
-    body: "Inter",
-    link: "https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Outfit:wght@400;600;700&display=swap"
+    theme: 'Modern Tech / SaaS',
+    header: 'Outfit',
+    body: 'Inter',
+    link: 'https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Outfit:wght@400;600;700&display=swap'
   },
   {
-    theme: "Premium / Luxury / Editorial",
-    header: "Playfair Display",
-    body: "Lora",
-    link: "https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,500;1,400&family=Playfair+Display:wght@500;700&display=swap"
+    theme: 'Premium / Luxury / Editorial',
+    header: 'Playfair Display',
+    body: 'Lora',
+    link: 'https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,500;1,400&family=Playfair+Display:wght@500;700&display=swap'
   },
   {
-    theme: "Clean / Minimalist",
-    header: "Plus Jakarta Sans",
-    body: "Plus Jakarta Sans",
-    link: "https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap"
+    theme: 'Clean / Minimalist',
+    header: 'Plus Jakarta Sans',
+    body: 'Plus Jakarta Sans',
+    link: 'https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap'
   }
 ];
 
 // Layouts UI Premium en HTML/CSS inyectables
 const LAYOUTS = {
-  "dashboard-layout": {
-    name: "Premium Admin Dashboard",
+  'dashboard-layout': {
+    name: 'Premium Admin Dashboard',
     css: `
 body {
   margin: 0;
@@ -146,8 +155,8 @@ body {
 </div>
     `
   },
-  "landing-hero": {
-    name: "Ultra-Premium Hero Section",
+  'landing-hero': {
+    name: 'Ultra-Premium Hero Section',
     css: `
 .hero {
   display: flex;
@@ -214,48 +223,48 @@ body {
 // --- Endpoints ---
 
 // 1. Root: Informacion de la API
-app.get('/', (req, res) => {
+app.get('/', (_req, res) => {
   res.json({
     ok: true,
     data: {
-      name: "Proyectos IA - API de Diseño & Assets",
-      version: "1.0.0",
+      name: 'Proyectos IA - API de Diseño & Assets',
+      version: '1.1.0',
       endpoints: {
-        palette: "/palette",
-        fonts: "/fonts",
-        mockup: "/mockup"
+        palette: '/palette',
+        fonts: '/fonts',
+        mockup: '/mockup'
       }
     },
-    message: "Servicio de diseño en linea."
+    message: 'Servicio de diseño en linea.'
   });
 });
 
 // 2. GET: Paletas de colores
-app.get('/palette', (req, res) => {
+app.get('/palette', (_req, res) => {
   res.json({
     ok: true,
     data: PALETTES,
-    message: "Paletas premium curadas recuperadas correctamente."
+    message: 'Paletas premium curadas recuperadas correctamente.'
   });
 });
 
 // 3. GET: Fuentes recomendadas
-app.get('/fonts', (req, res) => {
+app.get('/fonts', (_req, res) => {
   res.json({
     ok: true,
     data: FONTS,
-    message: "Tipografias recomendadas recuperadas correctamente."
+    message: 'Tipografias recomendadas recuperadas correctamente.'
   });
 });
 
 // 4. POST: Generar mockup / estructura UI
 app.post('/mockup', (req, res) => {
   const { type } = req.body;
-  
+
   if (!type || !LAYOUTS[type]) {
     return res.status(404).json({
       ok: false,
-      error: "LAYOUT_NOT_FOUND",
+      error: 'LAYOUT_NOT_FOUND',
       message: `El mockup '${type}' no existe. Opciones disponibles: ${Object.keys(LAYOUTS).join(', ')}`
     });
   }
@@ -268,19 +277,38 @@ app.post('/mockup', (req, res) => {
 });
 
 // 5. GET: Ping healthcheck
-app.get('/ping', (req, res) => {
-  res.json({ status: 'ok' });
+app.get('/ping', (_req, res) => {
+  res.json({
+    status: 'ok',
+    service: 'api-design-assets',
+    port: PORT,
+    ...getProcessMetrics()
+  });
 });
 
+let serverInstance = null;
+
 // 6. POST: Shutdown
-app.post('/api/shutdown', (req, res) => {
+app.post('/api/shutdown', (_req, res) => {
   res.json({ success: true, message: 'Servidor apagándose...' });
   console.log('Recibida petición de apagado. Cerrando servidor de Design Assets...');
   setTimeout(() => {
-    process.exit(0);
-  }, 1000);
+    if (serverInstance) serverInstance.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 400).unref();
+  }, 300);
 });
 
-app.listen(PORT, () => {
-  console.log(`⚡ API de Diseno & Assets activa en http://localhost:${PORT}`);
+app.use((err, _req, res, next) => {
+  if (err && err.status === 403) {
+    return res.status(403).json({ ok: false, error: 'CORS_BLOCKED', message: err.message });
+  }
+  return next(err);
 });
+
+if (process.env.NODE_ENV !== 'test') {
+  serverInstance = app.listen(PORT, LOCAL_HOST, () => {
+    console.log(`API de Diseno & Assets activa en http://${LOCAL_HOST}:${PORT}`);
+  });
+}
+
+export { app };

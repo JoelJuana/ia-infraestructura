@@ -38,12 +38,12 @@ const colors = {
 };
 
 /**
- * Comprueba de manera asíncrona si un puerto está en uso.
+ * Comprueba de manera asíncrona si un puerto está en uso en loopback.
  */
 function isPortInUse(port) {
   return new Promise((resolve) => {
     const client = new net.Socket();
-    client.setTimeout(350);
+    client.setTimeout(300);
     client.once('connect', () => {
       client.destroy();
       resolve(true);
@@ -61,22 +61,32 @@ function isPortInUse(port) {
 }
 
 /**
- * Comprueba si un servicio responde correctamente a /ping.
+ * Consulta /ping y devuelve el objeto de respuesta si el servicio está saludable, o null si falla.
  */
-async function isServiceResponding(port) {
+async function probeServicePing(port) {
   try {
     const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), 400);
+    const id = setTimeout(() => controller.abort(), 450);
     const res = await fetch(`http://127.0.0.1:${port}/ping`, { signal: controller.signal });
     clearTimeout(id);
     if (res.ok) {
       const data = await res.json();
-      return data && (data.status === 'ok' || data.gateway === 'online' || data.success === true);
+      if (data && (data.status === 'ok' || data.gateway === 'online' || data.success === true)) {
+        return data;
+      }
     }
   } catch {
-    // Ignorar fallos
+    // Ignorar fallos de red/timeout
   }
-  return false;
+  return null;
+}
+
+/**
+ * Comprueba si un servicio responde correctamente a /ping.
+ */
+async function isServiceResponding(port) {
+  const data = await probeServicePing(port);
+  return Boolean(data);
 }
 
 /**
@@ -123,7 +133,6 @@ function getListeningPidsByPort(ports) {
         const localAddress = parts[1];
         const foreignAddress = parts[2];
         const pid = parts[parts.length - 1];
-        // En sockets en escucha, la dirección remota termina en :0 o :*
         if (!foreignAddress.endsWith(':0') && !foreignAddress.endsWith(':*')) continue;
         const colonIdx = localAddress.lastIndexOf(':');
         if (colonIdx !== -1 && pid && pid !== '0' && /^\d+$/.test(pid)) {
@@ -198,72 +207,34 @@ function rotateLogIfNeeded(serviceName) {
 }
 
 /**
- * Prepara los scripts de lanzamiento de un servicio y devuelve la ruta del VBS (Windows) o lanza el proceso (Unix).
+ * Lanza un microservicio de forma 100% nativa en segundo plano (compatible con Windows ARM64 y Unix, sin VBScript/CMD/WMI).
  */
-function prepareOrSpawnService(svc, svcPath, logFile) {
-  const logDir = path.dirname(logFile);
-  if (process.platform === 'win32') {
-    const tempBinDir = path.join(logDir, 'temp-bin');
-    if (!fs.existsSync(tempBinDir)) {
-      fs.mkdirSync(tempBinDir, { recursive: true });
-    }
-
-    const batFile = path.join(tempBinDir, `start-${svc.name}.bat`);
-    const batContent = `@echo off\r\nset PORT=${svc.port}\r\ncd /d "${svcPath}"\r\n"${process.execPath}" ${svc.script} >> "${logFile}" 2>&1\r\n`;
-    fs.writeFileSync(batFile, batContent, 'utf-8');
-
-    const vbsFile = path.join(tempBinDir, `start-${svc.name}.vbs`);
-    const vbsContent = `CreateObject("Wscript.Shell").Run "cmd.exe /c ""${batFile}""", 0, False\r\n`;
-    fs.writeFileSync(vbsFile, vbsContent, 'utf-8');
-    return vbsFile;
-  } else {
-    const logFd = fs.openSync(logFile, 'a');
-    try {
-      const child = spawn(process.execPath, [svc.script], {
-        cwd: svcPath,
-        env: { ...process.env, PORT: String(svc.port) },
-        detached: true,
-        stdio: ['ignore', logFd, logFd]
-      });
-      child.unref();
-    } finally {
-      try {
-        fs.closeSync(logFd);
-      } catch {
-        // Ignorar
-      }
-    }
-    return null;
-  }
-}
-
-/**
- * Ejecuta en lote todos los scripts VBS pendientes mediante una única invocación de PowerShell/WMI en Windows ARM64.
- */
-function executeWindowsBatchSpawn(vbsFiles) {
-  if (!vbsFiles || vbsFiles.length === 0) return;
+function spawnDetachedService(svc, svcPath, logFile) {
+  const logFd = fs.openSync(logFile, 'a');
   try {
-    const cimCommands = vbsFiles
-      .map((vbs) => `Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine='wscript.exe "${vbs}"'} | Out-Null`)
-      .join('; ');
-    execSync(`powershell.exe -NoProfile -NonInteractive -Command "${cimCommands.replace(/"/g, '\\"')}"`, {
-      stdio: 'ignore',
-      windowsHide: true
+    const child = spawn(process.execPath, [svc.script], {
+      cwd: svcPath,
+      env: {
+        ...process.env,
+        PORT: String(svc.port),
+        BIND_HOST: process.env.BIND_HOST || '127.0.0.1'
+      },
+      detached: true,
+      windowsHide: true,
+      stdio: ['ignore', logFd, logFd]
     });
-  } catch {
-    for (const vbsFile of vbsFiles) {
-      const child = spawn('wscript.exe', [vbsFile], {
-        detached: true,
-        windowsHide: true,
-        stdio: 'ignore'
-      });
-      child.unref();
+    child.unref();
+  } finally {
+    try {
+      fs.closeSync(logFd);
+    } catch {
+      // Ignorar cierre de descriptor padre
     }
   }
 }
 
 /**
- * Arranca los microservicios de la infraestructura en paralelo.
+ * Arranca los microservicios de la infraestructura en paralelo usando spawn nativo ARM64.
  */
 async function startAll(targetSvcName) {
   const isGlobal = !targetSvcName || targetSvcName === 'all';
@@ -286,6 +257,11 @@ async function startAll(targetSvcName) {
     ? SERVICES.filter((s) => s.name === normalizedTarget)
     : SERVICES;
 
+  if (targetServices.length === 0) {
+    console.error(`  ${colors.red}[ERROR] Servicio desconocido: "${normalizedTarget}"${colors.reset}\n`);
+    process.exit(1);
+  }
+
   // Comprobar estado inicial de puertos en paralelo
   const initialStates = await Promise.all(
     targetServices.map(async (svc) => {
@@ -297,8 +273,6 @@ async function startAll(targetSvcName) {
       return { svc, svcPath, exists: true, inUse, responding };
     })
   );
-
-  const pendingVbsFiles = [];
 
   for (const { svc, svcPath, exists, inUse, responding } of initialStates) {
     if (!exists) {
@@ -329,7 +303,6 @@ async function startAll(targetSvcName) {
       }
     }
 
-    // Verificar si el servicio requiere .env y si el archivo existe
     if (SERVICES_REQUIRING_ENV.includes(svc.name)) {
       const envPath = path.join(svcPath, '.env');
       if (!fs.existsSync(envPath)) {
@@ -341,47 +314,43 @@ async function startAll(targetSvcName) {
 
     console.log(`  ${colors.white}[START] Arrancando ${svc.name.padEnd(23)} en puerto ${svc.port}...${colors.reset}`);
     const logFile = path.join(logDir, `${svc.name}.log`);
-    const vbsFile = prepareOrSpawnService(svc, svcPath, logFile);
-    if (vbsFile) {
-      pendingVbsFiles.push(vbsFile);
-    }
+    spawnDetachedService(svc, svcPath, logFile);
   }
 
-  // Lanzar todos los servicios pendientes de una sola vez en Windows
-  if (pendingVbsFiles.length > 0) {
-    executeWindowsBatchSpawn(pendingVbsFiles);
-  }
+  console.log(`\n${colors.cyan}--- Verificación de servicios (/ping) ---${colors.reset}\n`);
 
-  console.log(`\n${colors.cyan}--- Verificación de servicios ---${colors.reset}\n`);
-
-  // Espera inteligente: comprobar cada 150ms hasta que todos los servicios objetivo estén escuchando (máx. 5s)
+  // Espera inteligente: comprobar cada 120ms hasta que todos los servicios respondan a /ping (máx. 5s)
   const maxWaitMs = 5000;
   const startWait = Date.now();
+  let finalPings = [];
   while (Date.now() - startWait < maxWaitMs) {
-    const statuses = await Promise.all(targetServices.map((s) => isPortInUse(s.port)));
-    if (statuses.every(Boolean)) {
+    finalPings = await Promise.all(targetServices.map((s) => probeServicePing(s.port)));
+    if (finalPings.every(Boolean)) {
       break;
     }
-    await sleep(150);
+    await sleep(120);
   }
 
-  const finalStates = await Promise.all(targetServices.map((s) => isPortInUse(s.port)));
   targetServices.forEach((svc, idx) => {
-    const inUse = finalStates[idx];
+    const pingData = finalPings[idx];
     const padName = svc.name.padEnd(23);
-    if (inUse) {
-      console.log(`  ${colors.green}[OK]      ${padName} http://localhost:${svc.port}${colors.reset}`);
+    if (pingData) {
+      const memTag = pingData.memoryMB ? ` ${colors.gray}(${pingData.memoryMB} MB)${colors.reset}` : '';
+      console.log(`  ${colors.green}[OK]      ${padName} http://127.0.0.1:${svc.port}${colors.reset}${memTag}`);
     } else {
       console.log(`  ${colors.red}[OFFLINE] ${padName} (puerto ${svc.port})${colors.reset}`);
     }
   });
 
-  console.log(`\n${colors.green}==================================================`);
-  console.log(`  Gateway disponible en: http://localhost:3000`);
-  console.log(`  Health check:          http://localhost:3000/api/health`);
-  console.log(`  Logs en:               .infra-logs/`);
-  console.log(`  Para detener:          npm run stop`);
-  console.log(`==================================================${colors.reset}\n`);
+  if (isGlobal || normalizedTarget === 'infra-gateway') {
+    console.log(`\n${colors.green}==================================================`);
+    console.log(`  Gateway disponible en: http://localhost:3000`);
+    console.log(`  Health check:          http://localhost:3000/api/health`);
+    console.log(`  Modo Auto-Wakeup JIT:  Activo en todas las rutas /api/*`);
+    console.log(`  Logs en:               .infra-logs/`);
+    console.log(`  Para detener:          npm run stop`);
+    console.log(`==================================================${colors.reset}\n`);
+  }
 }
 
 /**
@@ -427,7 +396,7 @@ async function stopAll(targetSvcName) {
     while (Date.now() - startWait < 1500) {
       const checks = await Promise.all(activeToWait.map((port) => isPortInUse(port)));
       if (checks.every((inUse) => !inUse)) break;
-      await sleep(150);
+      await sleep(120);
     }
   }
 
@@ -479,7 +448,7 @@ async function stopAll(targetSvcName) {
 }
 
 /**
- * Imprime el estado detallado actual de los microservicios (puerto, ping HTTP, latencia y .env).
+ * Imprime el estado detallado actual de los microservicios (puerto, ping HTTP, latencia, RAM y .env).
  */
 async function printStatus() {
   console.log(`\n${colors.cyan}--- Estado de la Infraestructura ---${colors.reset}\n`);
@@ -488,27 +457,37 @@ async function printStatus() {
       const inUse = await isPortInUse(svc.port);
       const requiresEnv = SERVICES_REQUIRING_ENV.includes(svc.name);
       const hasEnv = !requiresEnv || fs.existsSync(path.join(ROOT, svc.dir, '.env'));
-      if (!inUse) return { svc, inUse: false, responding: false, latency: null, requiresEnv, hasEnv };
+      if (!inUse) return { svc, inUse: false, pingData: null, latency: null, requiresEnv, hasEnv };
       const start = Date.now();
-      const responding = await isServiceResponding(svc.port);
+      const pingData = await probeServicePing(svc.port);
       const latency = Date.now() - start;
-      return { svc, inUse: true, responding, latency, requiresEnv, hasEnv };
+      return { svc, inUse: true, pingData, latency, requiresEnv, hasEnv };
     })
   );
 
-  for (const { svc, inUse, responding, latency, requiresEnv, hasEnv } of states) {
+  let totalMemoryMB = 0;
+
+  for (const { svc, inUse, pingData, latency, requiresEnv, hasEnv } of states) {
     const padName = svc.name.padEnd(23);
     const envBadge = requiresEnv
       ? (hasEnv ? `${colors.green}[.env OK]${colors.reset}` : `${colors.yellow}[SIN .env]${colors.reset}`)
       : '';
 
-    if (inUse && responding) {
-      console.log(`  ${colors.green}[ONLINE]${colors.reset}  ${padName} puerto ${svc.port} ${colors.gray}(${latency}ms)${colors.reset} ${envBadge}`);
+    if (inUse && pingData) {
+      if (typeof pingData.memoryMB === 'number') {
+        totalMemoryMB += pingData.memoryMB;
+      }
+      const memInfo = pingData.memoryMB ? ` · ${pingData.memoryMB} MB` : '';
+      console.log(`  ${colors.green}[ONLINE]${colors.reset}  ${padName} puerto ${svc.port} ${colors.gray}(${latency}ms${memInfo})${colors.reset} ${envBadge}`);
     } else if (inUse) {
       console.log(`  ${colors.yellow}[BUSY]${colors.reset}    ${padName} puerto ${svc.port} (sin respuesta /ping) ${envBadge}`);
     } else {
       console.log(`  ${colors.gray}[STOPPED]${colors.reset} ${padName} (puerto ${svc.port}) ${envBadge}`);
     }
+  }
+
+  if (totalMemoryMB > 0) {
+    console.log(`\n  ${colors.cyan}Memoria total en uso:${colors.reset} ${totalMemoryMB.toFixed(1)} MB`);
   }
   console.log('');
 }

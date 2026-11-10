@@ -4,37 +4,36 @@ const path = require('path');
 const { BASE_PROYECTOS_DIR } = require('../config/env');
 
 const DOMINIOS_API_PORT = process.env.DOMAIN_MANAGER_PORT || 3400;
-const DOMINIOS_API_URL = `http://localhost:${DOMINIOS_API_PORT}`;
+const DOMINIOS_API_URL = `http://127.0.0.1:${DOMINIOS_API_PORT}`;
 
 /**
  * Asegura que la API de gestion-dominios esté levantada localmente.
- * Si no responde, intenta spawnear el proceso de forma independiente.
+ * Si no responde, intenta spawnear el proceso de forma nativa (sin shell).
  */
 function ensureDominiosRunning() {
   return new Promise((resolve) => {
     if (process.env.NODE_ENV === 'test') {
       return resolve(false);
     }
-    const req = http.get(`${DOMINIOS_API_URL}/ping`, (res) => {
+    const req = http.get(`${DOMINIOS_API_URL}/ping`, () => {
       resolve(true);
     });
-    
+
     req.on('error', () => {
-      console.log('Iniciando gestion-dominios...');
+      console.log('Iniciando infra-domain-manager...');
       const serverPath = path.resolve(__dirname, '..', '..', 'infra-domain-manager');
-      
-      const process = spawn('node', ['server.js'], {
+
+      const child = spawn(process.execPath, ['server.js'], {
         cwd: serverPath,
         detached: true,
-        stdio: 'ignore',
-        shell: true
+        windowsHide: true,
+        stdio: 'ignore'
       });
-      process.unref();
-      
-      // Esperar un momento a que levante el servidor
-      setTimeout(() => resolve(true), 2500);
+      child.unref();
+
+      setTimeout(() => resolve(true), 1200);
     });
-    
+
     req.setTimeout(1000, () => {
       req.destroy();
       resolve(false);
@@ -56,7 +55,7 @@ function callDominiosAPI(endpoint, method, bodyObj = null) {
     }
     const postData = bodyObj ? JSON.stringify(bodyObj) : '';
     const options = {
-      hostname: 'localhost',
+      hostname: '127.0.0.1',
       port: DOMINIOS_API_PORT,
       path: endpoint,
       method: method,

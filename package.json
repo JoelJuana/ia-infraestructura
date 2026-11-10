@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "workspaces": [
+    "packages/shared",
     "infra-gateway",
     "infra-github",
     "infra-firebase",
@@ -16,6 +17,7 @@
   "scripts": {
     "bootstrap": "npm install",
     "start": "node scripts/infra-runner.js start",
+    "start:jit": "node scripts/infra-runner.js start infra-gateway",
     "stop": "node scripts/infra-runner.js stop",
     "restart": "node scripts/infra-runner.js restart",
     "status": "node scripts/infra-runner.js status",

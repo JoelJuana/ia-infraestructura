@@ -3,7 +3,13 @@ const cors = require('cors');
 const helmet = require('helmet');
 const path = require('path');
 const fs = require('fs');
-const { spawn } = require('child_process');
+const { spawn, execFile } = require('child_process');
+const {
+  LOCAL_HOST,
+  createLocalCorsOptions,
+  localSecurityMiddleware,
+  getProcessMetrics
+} = require('../packages/shared/index.cjs');
 
 // Configuración y servicios modulares
 const { PORT, BASE_PROYECTOS_DIR, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO } = require('./config/env');
@@ -28,10 +34,11 @@ function pruneOldJobs() {
 }
 
 // Middlewares globales de seguridad y utilidades
+app.use(localSecurityMiddleware);
 app.use(helmet({
   contentSecurityPolicy: false // Desactivar CSP estricto para permitir el renderizado y carga de fuentes/CDNs de la SPA local
 }));
-app.use(cors());
+app.use(cors(createLocalCorsOptions()));
 app.use(express.json());
 app.use((req, res, next) => {
   // Normalizar rutas cuando entran por el API Gateway (/api/proj/projects -> /api/projects)
@@ -54,19 +61,24 @@ app.get('/', (req, res) => {
 
 
 /**
- * Helper para verificar la disponibilidad de comandos en el sistema sin disparar DEP0190
+ * Helper para verificar la disponibilidad de comandos en el sistema sin invocar shell
  */
 function checkTool(cmd, args) {
   return new Promise((resolve) => {
-    const child = spawn(`${cmd} ${args.join(' ')}`, { shell: true, windowsHide: true });
-    child.on('close', (code) => resolve(code === 0));
-    child.on('error', () => resolve(false));
+    execFile(cmd, args, { windowsHide: true, timeout: 4000 }, (err) => {
+      resolve(!err);
+    });
   });
 }
 
 // 1. Health check de la API
-app.get('/ping', (req, res) => {
-  res.json({ status: 'ok' });
+app.get('/ping', (_req, res) => {
+  res.json({
+    status: 'ok',
+    service: 'infra-project-creator',
+    port: PORT,
+    ...getProcessMetrics()
+  });
 });
 
 // 2. Diagnóstico de herramientas de entorno local
@@ -406,17 +418,23 @@ app.post('/api/projects/rename', async (req, res) => {
   }
 });
 
+let serverInstance = null;
+
 // 7. Endpoint: Apagar servidor de scaffolding
-app.post('/api/shutdown', (req, res) => {
+app.post('/api/shutdown', (_req, res) => {
   res.json({ success: true, message: 'Servidor Express apagándose...' });
   console.log('Recibida petición de apagado. Cerrando servidor...');
   setTimeout(() => {
-    process.exit(0);
-  }, 1000);
+    if (serverInstance) serverInstance.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 400).unref();
+  }, 300);
 });
 
 // Manejador de errores global para Express
-app.use((err, req, res, next) => {
+app.use((err, _req, res, _next) => {
+  if (err && err.status === 403) {
+    return res.status(403).json({ ok: false, error: 'CORS_BLOCKED', message: err.message });
+  }
   console.error('[Error de Servidor]', err.stack);
   res.status(500).json({
     error: 'Internal Server Error',
@@ -425,8 +443,8 @@ app.use((err, req, res, next) => {
 });
 
 if (process.env.NODE_ENV !== 'test') {
-  app.listen(PORT, () => {
-    console.log(`⚡ Servidor Express de Project Creator activo en http://localhost:${PORT}`);
+  serverInstance = app.listen(PORT, LOCAL_HOST, () => {
+    console.log(`Servidor Express de Project Creator activo en http://${LOCAL_HOST}:${PORT}`);
   });
 }
 
