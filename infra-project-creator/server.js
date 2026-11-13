@@ -13,9 +13,32 @@ const {
 
 // Configuración y servicios modulares
 const { PORT, BASE_PROYECTOS_DIR, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO } = require('./config/env');
-const { scaffoldProject, deleteProjectFolder, SAFE_NAME_REGEX } = require('./services/scaffolderService');
+const { scaffoldProject, deleteProjectFolder, getProjectSubfolder, SAFE_NAME_REGEX } = require('./services/scaffolderService');
 const { createGitHubIssue, syncProjectWithGit } = require('./services/gitService');
 const { ensureDominiosRunning, callDominiosAPI, createProjectCNAME, updateProjectCNAME, deleteProjectCNAME } = require('./services/dnsService');
+
+// Disparador desacoplado de publicación automática en IA_Documentacion ("Zero-Touch Docs")
+function triggerPortalAutoPublish(reason, logFn = null) {
+  if (process.env.NODE_ENV === 'test') return;
+  const docsDir = 'C:\\Users\\jjtei\\Desktop\\IA_Documentacion\\src\\docs';
+  const autoPublishScript = path.join(docsDir, 'scripts', 'auto-publish.js');
+  if (!fs.existsSync(autoPublishScript)) return;
+
+  try {
+    const child = spawn(process.execPath, [autoPublishScript], {
+      cwd: docsDir,
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true
+    });
+    child.unref();
+    const msg = `✓ Sincronización y publicación automática en IA_Documentacion disparada (${reason}).`;
+    if (logFn) logFn(msg);
+    else console.log(`[Auto-Publish Hook] ${msg}`);
+  } catch (err) {
+    console.warn('[Auto-Publish Hook] Aviso al disparar auto-publish:', err.message);
+  }
+}
 
 const app = express();
 
@@ -141,7 +164,7 @@ app.post('/api/projects/create', async (req, res) => {
     }
 
     const nameClean = name.trim().replace(/\s+/g, '-');
-    const subfolder = nameClean.toLowerCase().startsWith('infra-') || ['crear-proyecto', 'project-creator', 'github', 'firbase', 'firebase', 'gateway', 'gestion-dominios', 'domain-manager'].includes(nameClean.toLowerCase()) ? 'infra' : 'apps';
+    const subfolder = getProjectSubfolder(nameClean, type);
     const projectPath = path.join(BASE_PROYECTOS_DIR, subfolder, nameClean);
 
     // Validar existencia previa para responder rápido antes de iniciar el Job
@@ -232,6 +255,9 @@ app.post('/api/projects/create', async (req, res) => {
       // 5.4 Sincronizar el monorepositorio con Git
       await syncProjectWithGit(nameClean, activeJobsRef, jobId);
 
+      // 5.5 Disparar publicación automática en el portal IA_Documentacion
+      triggerPortalAutoPublish(`create:${nameClean}`, log);
+
       activeJobsRef[jobId].status = 'completed';
       log(`✓ Proceso de creación y automatización de "${nameClean}" finalizado con éxito.`);
     })();
@@ -283,7 +309,7 @@ app.delete('/api/projects/:name', async (req, res) => {
           });
         };
         
-        const subfolder = cleanName.toLowerCase().startsWith('infra-') || ['crear-proyecto', 'project-creator', 'github', 'firbase', 'firebase', 'gateway', 'gestion-dominios', 'domain-manager'].includes(cleanName.toLowerCase()) ? 'infra' : 'apps';
+        const subfolder = getProjectSubfolder(cleanName).replace(/\\/g, '/');
         await runGit(['rm', '-r', '--cached', `${subfolder}/${cleanName}`]);
         await runGit(['add', 'projects.json']);
         
@@ -295,6 +321,8 @@ app.delete('/api/projects/:name', async (req, res) => {
         gitMsg = `Error al sincronizar con Git: ${e.message}`;
       }
     }
+
+    triggerPortalAutoPublish(`delete:${cleanName}`);
     
     res.json({
       success: true,
@@ -325,8 +353,8 @@ app.post('/api/projects/rename', async (req, res) => {
       return res.status(400).json({ error: 'El nombre del proyecto contiene caracteres no permitidos.' });
     }
     
-    const oldSubfolder = cleanOld.toLowerCase().startsWith('infra-') || ['crear-proyecto', 'project-creator', 'github', 'firbase', 'firebase', 'gateway', 'gestion-dominios', 'domain-manager'].includes(cleanOld.toLowerCase()) ? 'infra' : 'apps';
-    const newSubfolder = cleanNew.toLowerCase().startsWith('infra-') || ['crear-proyecto', 'project-creator', 'github', 'firbase', 'firebase', 'gateway', 'gestion-dominios', 'domain-manager'].includes(cleanNew.toLowerCase()) ? 'infra' : 'apps';
+    const oldSubfolder = getProjectSubfolder(cleanOld);
+    const newSubfolder = getProjectSubfolder(cleanNew);
     
     const oldPath = path.join(BASE_PROYECTOS_DIR, oldSubfolder, cleanOld);
     const newPath = path.join(BASE_PROYECTOS_DIR, newSubfolder, cleanNew);
@@ -390,8 +418,8 @@ app.post('/api/projects/rename', async (req, res) => {
           });
         };
         
-        await runGit(['rm', '-r', '--cached', `${oldSubfolder}/${cleanOld}`]);
-        await runGit(['add', `${newSubfolder}/${cleanNew}`]);
+        await runGit(['rm', '-r', '--cached', `${oldSubfolder.replace(/\\/g, '/')}/${cleanOld}`]);
+        await runGit(['add', `${newSubfolder.replace(/\\/g, '/')}/${cleanNew}`]);
         await runGit(['add', 'projects.json']);
         
         const commitMsg = `refactor(${cleanNew}): renombrar proyecto desde ${cleanOld} y actualizar DNS`;
@@ -402,6 +430,8 @@ app.post('/api/projects/rename', async (req, res) => {
         gitMsg = `Error al sincronizar con Git: ${e.message}`;
       }
     }
+
+    triggerPortalAutoPublish(`rename:${cleanOld}->${cleanNew}`);
     
     res.json({
       success: true,

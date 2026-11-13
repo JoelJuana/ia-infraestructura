@@ -22,6 +22,7 @@ Este espacio aloja el API Gateway y los microservicios locales encargados de dar
 *   Los microservicios (GitHub, Firebase, Cloudflare) requieren variables de entorno configuradas en archivos `.env` individuales en sus carpetas.
 *   **Nunca** expongas ni guardes en commits tokens de API, contraseñas o credenciales en texto plano. Asegúrate de que los archivos `.env` estén ignorados en el `.gitignore`.
 
-## 4. Control de Versiones (Git)
+## 4. Control de Versiones (Git) y Sincronización Documental
 *   Este es un repositorio Git independiente. Sube tus aportes de infraestructura siguiendo los Conventional Commits (`feat(gateway): ...`, `fix(github): ...`).
 *   Los cambios deben ser empujados a la rama `main` al terminar.
+*   Si añades un microservicio o modificas puertos, rutas o el `README.md` de algún servicio, ejecuta `npm run publish:auto --prefix "C:\Users\jjtei\Desktop\IA_Documentacion\src\docs"` antes de cerrar la sesión para propagar la documentación a producción y al RAG.

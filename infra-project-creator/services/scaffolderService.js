@@ -117,6 +117,10 @@ function getProjectSubfolder(name, type) {
   const infraNames = ['crear-proyecto', 'project-creator', 'github', 'firbase', 'firebase', 'gateway', 'gestion-dominios', 'domain-manager'];
   if (clean.startsWith('infra-') || infraNames.includes(clean)) {
     console.warn(`⚠️ "${name}" parece un proyecto de infraestructura. Los proyectos de infra se gestionan en C:\\Users\\jjtei\\Desktop\\IA_Infraestructura, no en el monorepositorio de apps.`);
+    return 'infra';
+  }
+  if (clean.startsWith('app-bp-')) {
+    return path.join('apps', 'business-plans');
   }
   return 'apps';
 }
@@ -277,8 +281,11 @@ function deleteProjectFolder(projectName) {
     throw new Error(`Operación denegada: '${nameClean}' es un componente de infraestructura protegido.`);
   }
   
-  // Buscar en apps e infra
+  // Buscar en apps, apps/business-plans e infra
   let projectPath = path.join(BASE_PROYECTOS_DIR, 'apps', nameClean);
+  if (!fs.existsSync(projectPath)) {
+    projectPath = path.join(BASE_PROYECTOS_DIR, 'apps', 'business-plans', nameClean);
+  }
   if (!fs.existsSync(projectPath)) {
     projectPath = path.join(BASE_PROYECTOS_DIR, 'infra', nameClean);
   }
@@ -296,5 +303,6 @@ function deleteProjectFolder(projectName) {
 module.exports = {
   scaffoldProject,
   deleteProjectFolder,
+  getProjectSubfolder,
   SAFE_NAME_REGEX
 };
